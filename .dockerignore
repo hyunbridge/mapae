@@ -1,0 +1,36 @@
+# Keep secrets and local-only files out of the Docker build context.
+.env
+.env.*
+.envrc
+
+# VCS / metadata
+.git
+.gitignore
+
+# Python caches / venvs
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Local editor / OS files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+
+# Misc
+*.log
