@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timezone
 
 from aiosmtpd.smtp import Envelope
@@ -14,8 +15,17 @@ logger = get_logger("smtp")
 
 
 class PermissiveHandler:
-    def __init__(self, redis_client: redis.Redis):
-        self.redis = redis_client
+    def __init__(self, redis_url: str):
+        self._redis_url = redis_url
+        self._redis: redis.Redis | None = None
+        self._redis_lock = asyncio.Lock()
+
+    async def _get_redis(self) -> redis.Redis:
+        if self._redis is None:
+            async with self._redis_lock:
+                if self._redis is None:
+                    self._redis = redis.from_url(self._redis_url, decode_responses=True)
+        return self._redis
 
     async def handle_RCPT(self, server, session, envelope, address, rcpt_options):
         if settings.ALLOWED_RCPT_SUFFIXES:
@@ -69,7 +79,8 @@ class PermissiveHandler:
         nonce = find_nonce(body_text)
 
         if nonce and phone and carrier:
-            auth_id = await self.redis.get(f"nonce:{nonce}")
+            redis_client = await self._get_redis()
+            auth_id = await redis_client.get(f"nonce:{nonce}")
             if auth_id:
                 payload = VerifiedPayload(
                     status="verified",
@@ -78,7 +89,7 @@ class PermissiveHandler:
                     timestamp=datetime.now(timezone.utc).isoformat(),
                 )
                 record = AuthRecord(key=f"auth:{auth_id}", payload=payload)
-                await self.redis.set(
+                await redis_client.set(
                     record.key, payload.model_dump_json(), ex=settings.VERIFIED_TTL_SECONDS
                 )
                 logger.info("Stored verification for %s (%s)", phone, carrier)

@@ -18,7 +18,7 @@ logger = get_logger("main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.redis = get_client()
-    controller = create_controller(app.state.redis)
+    controller = create_controller(settings.REDIS_URL)
     controller.start()
     app.state.smtp_controller = controller
     try:
@@ -48,4 +48,3 @@ async def general_exception_handler(request, exc: Exception):
         status_code=500,
         content={"detail": "서버 오류가 발생했습니다"},
     )
-
