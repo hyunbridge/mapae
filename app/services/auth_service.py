@@ -47,7 +47,7 @@ class AuthService:
         return {
             "auth_id": auth_id,
             "sms_body": sms_body,
-            "link": f"sms:verify@yourdomain.com?body={sms_body}",
+            "link": f"sms:{settings.SMS_INBOUND_ADDRESS}?body={sms_body}",
             "ttl_seconds": settings.AUTH_TTL_SECONDS,
         }
 

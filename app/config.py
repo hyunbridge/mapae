@@ -10,9 +10,12 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     DUMP_INBOUND: bool = False
     ALLOWED_RCPT_SUFFIXES: list[str] = []
+    SMS_INBOUND_ADDRESS: str = "verify@yourdomain.com"
 
     SMTP_HOST: str = "0.0.0.0"
     SMTP_PORT: int = 25
+
+    CORS_ALLOW_ORIGINS: list[str] = ["*"]
 
     AUTH_TTL_SECONDS: int = 600
     VERIFIED_TTL_SECONDS: int = 300

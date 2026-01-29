@@ -1,10 +1,12 @@
 from fastapi import APIRouter, Depends, Path
 
+from app.config import get_settings
 from app.dependencies import get_auth_service
 from app.schemas.auth import AuthCheckResponse, AuthInitResponse
 from app.services.auth_service import AuthService
 
 router = APIRouter(prefix="/auth", tags=["인증"])
+settings = get_settings()
 
 
 @router.post(
@@ -27,7 +29,7 @@ router = APIRouter(prefix="/auth", tags=["인증"])
                     "example": {
                         "auth_id": "ab12cd34ef56gh78ij90kl12mn34op56",
                         "sms_body": "[MAPAE:f8a1b2c3d4e5f6...]",
-                        "link": "sms:verify@yourdomain.com?body=[MAPAE:f8a1b2c3d4e5f6...]",
+                        "link": f"sms:{settings.SMS_INBOUND_ADDRESS}?body=[MAPAE:f8a1b2c3d4e5f6...]",
                         "ttl_seconds": 600
                     }
                 }
