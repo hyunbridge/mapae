@@ -38,8 +38,7 @@ MAPAE는 SMTP 서버(25/tcp)와 HTTP API(8000/tcp)를 동시에 제공합니다.
 | REDIS_URL | redis://localhost:6379/0 | Redis 연결 주소 |
 | SMTP_HOST | 0.0.0.0 | SMTP 바인딩 호스트 |
 | SMTP_PORT | 25 | SMTP 바인딩 포트 |
-| ALLOWED_RCPT_SUFFIXES | [] | 허용할 수신 이메일 주소 목록 (예: ["verify@mydomain.com"]). 비워두면 모든 수신 허용. |
-| SMS_INBOUND_ADDRESS | verify@yourdomain.com | 인바운드 수신 주소 |
+| SMS_INBOUND_ADDRESS | verify@yourdomain.com | 인바운드 수신 주소(정확히 일치하지 않으면 수신 거부) |
 | DUMP_INBOUND | false | 수신된 이메일의 헤더/본문을 로그에 출력 |
 | CORS_ALLOW_ORIGINS | ["*"] | CORS 허용 Origin 목록 |
 | AUTH_TTL_SECONDS | 600 | 인증 시도(Nonce) 유효 시간 (초) |

@@ -28,10 +28,10 @@ class PermissiveHandler:
         return self._redis
 
     async def handle_RCPT(self, server, session, envelope, address, rcpt_options):
-        if settings.ALLOWED_RCPT_SUFFIXES:
-            addr = (address or "").lower()
-            if not any(addr.endswith(suffix) for suffix in settings.ALLOWED_RCPT_SUFFIXES):
-                return "550 Not relaying to that address"
+        inbound = (settings.SMS_INBOUND_ADDRESS or "").strip().lower()
+        addr = (address or "").strip().lower()
+        if inbound and addr != inbound:
+            return "550 Not relaying to that address"
         envelope.rcpt_tos.append(address)
         return "250 OK"
 
@@ -68,6 +68,9 @@ class PermissiveHandler:
             phone, carrier = env_phone, env_carrier
         elif hdr_carrier and (not peer_ip or hdr_spf_ok):
             phone, carrier = hdr_phone, hdr_carrier
+        if not carrier:
+            logger.info("Carrier domain not recognized")
+            return "550 Invalid carrier domain"
 
         if settings.DUMP_INBOUND:
             logger.info("MAIL FROM: %s", mail_from)
@@ -77,6 +80,9 @@ class PermissiveHandler:
             logger.info("BODY (decoded): %s", body_text)
 
         nonce = find_nonce(body_text)
+        if not nonce:
+            logger.info("Nonce not found in message body")
+            return "550 Invalid nonce"
 
         if nonce and phone and carrier:
             redis_client = await self._get_redis()

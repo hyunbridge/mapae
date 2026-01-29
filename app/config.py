@@ -9,7 +9,6 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     REDIS_URL: str = "redis://localhost:6379/0"
     DUMP_INBOUND: bool = False
-    ALLOWED_RCPT_SUFFIXES: list[str] = []
     SMS_INBOUND_ADDRESS: str = "verify@yourdomain.com"
 
     SMTP_HOST: str = "0.0.0.0"
