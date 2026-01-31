@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     SMS_INBOUND_ADDRESS: str = "verify@yourdomain.com"
 
     SMTP_HOST: str = "0.0.0.0"
-    SMTP_PORT: int = 25
+    SMTP_PORT: int = 2525
 
     CORS_ALLOW_ORIGINS: list[str] = ["*"]
 

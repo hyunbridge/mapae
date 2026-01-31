@@ -23,7 +23,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 
 COPY --from=builder /opt/venv /opt/venv
 
-EXPOSE 25 8000
+EXPOSE 2525 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["/opt/venv/bin/python", "-c", "import json,sys,urllib.request; resp = urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3); data = json.load(resp); sys.exit(0 if (resp.status == 200 and data.get('redis') == 'up') else 1)"]
