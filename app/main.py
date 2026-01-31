@@ -8,6 +8,7 @@ from app.config import get_settings
 from app.db import close_client, get_client
 from app.exceptions import MapaeException
 from app.routers.auth import router as auth_router
+from app.routers.health import router as health_router
 from app.smtp.server import create_controller
 from app.utils.logging import get_logger, setup_logging
 
@@ -38,6 +39,7 @@ app.add_middleware(
     allow_credentials=False,
 )
 app.include_router(auth_router)
+app.include_router(health_router)
 
 
 @app.exception_handler(MapaeException)
