@@ -12,6 +12,7 @@ from app.utils.logging import get_logger
 
 settings = get_settings()
 logger = get_logger("smtp")
+DATA_SIZE_LIMIT_BYTES = 128 * 1024
 
 
 class PermissiveHandler:
@@ -38,6 +39,14 @@ class PermissiveHandler:
     async def handle_DATA(self, server, session, envelope: Envelope):
         mail_from = envelope.mail_from
         raw = envelope.content
+        raw_len = len(raw) if raw else 0
+        if raw_len > DATA_SIZE_LIMIT_BYTES:
+            logger.warning(
+                "Message too large: %s bytes (limit=%s)",
+                raw_len,
+                DATA_SIZE_LIMIT_BYTES,
+            )
+            return "552 Message size exceeds limit"
         peer_ip = session.peer[0] if session and session.peer else None
         helo = getattr(session, "host_name", None)
 
@@ -76,7 +85,7 @@ class PermissiveHandler:
             logger.info("MAIL FROM: %s", mail_from)
             if header_from:
                 logger.info("HEADER FROM: %s", header_from)
-            logger.info("RAW BYTES LEN: %s", len(raw) if raw else 0)
+            logger.info("RAW BYTES LEN: %s", raw_len)
             logger.info("BODY (decoded): %s", body_text)
 
         nonce = find_nonce(body_text)
