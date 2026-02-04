@@ -2,11 +2,13 @@ package httpapi
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/labstack/echo/v4/middleware"
 
 	"mapae/internal/auth"
 	"mapae/internal/config"
@@ -41,6 +43,24 @@ func NewServer(settings *config.Settings, authService *auth.Service, logger *log
 	})
 
 	server := &Server{settings: settings, auth: authService, logger: logger, e: e}
+	e.Use(middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
+		LogMethod:    true,
+		LogURI:       true,
+		LogStatus:    true,
+		LogLatency:   true,
+		LogRemoteIP:  true,
+		LogProtocol:  true,
+		LogValuesFunc: func(_ echo.Context, v middleware.RequestLoggerValues) error {
+			server.logger.Printf(
+				"INFO:     %s - %q %d %dms",
+				v.RemoteIP,
+				fmt.Sprintf("%s %s %s", v.Method, v.URI, v.Protocol),
+				v.Status,
+				v.Latency.Milliseconds(),
+			)
+			return nil
+		},
+	}))
 	e.GET("/health", server.healthHandler)
 	e.POST("/auth/init", server.authInitHandler)
 	e.GET("/auth/check/:auth_id", server.authCheckHandler)

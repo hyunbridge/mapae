@@ -34,6 +34,7 @@ type session struct {
 	mailFrom string
 	rcptTos  []string
 	peerIP   net.IP
+	connStart time.Time
 }
 
 func NewServer(settings *config.Settings, authService *auth.Service, logger *logging.Logger) *Server {
@@ -73,7 +74,7 @@ func (b *backend) NewSession(c *smtpserver.Conn) (smtpserver.Session, error) {
 			}
 		}
 	}
-	return &session{server: b.server, peerIP: peerIP}, nil
+	return &session{server: b.server, peerIP: peerIP, connStart: time.Now()}, nil
 }
 
 func (s *session) Mail(from string, _ *smtpserver.MailOptions) error {
@@ -118,6 +119,29 @@ func (s *session) AuthPlain(username, password string) error {
 func (s *Server) handleData(ctx context.Context, sess *session, raw []byte) error {
 	mailFrom := sess.mailFrom
 	peerIP := sess.peerIP
+	rcptList := strings.Join(sess.rcptTos, ",")
+	maskedMailFrom := maskEmailLocalPart(mailFrom)
+	result := "fail"
+	authID := ""
+	stored := false
+	defer func() {
+		ip := ""
+		if peerIP != nil {
+			ip = peerIP.String()
+		}
+		if authID == "" {
+			authID = "-"
+		}
+		dur := time.Duration(0)
+		if !sess.connStart.IsZero() {
+			dur = time.Since(sess.connStart).Truncate(time.Millisecond)
+		}
+		if s.settings.Debug && mailFrom != "" {
+			s.logger.Printf(`INFO:     smtp %s - "RCPT TO: %s" result=%s auth_id=%s stored=%t mail_from=%s dur=%s`, ip, rcptList, result, authID, stored, mailFrom, dur)
+			return
+		}
+		s.logger.Printf(`INFO:     smtp %s - "RCPT TO: %s" result=%s stored=%t mail_from=%s dur=%s`, ip, rcptList, result, stored, maskedMailFrom, dur)
+	}()
 
 	bodyText, headers := parser.ParseBody(raw)
 	headerFrom := headers["from"]
@@ -207,6 +231,8 @@ func (s *Server) handleData(ctx context.Context, sess *session, raw []byte) erro
 		s.logger.Printf("Failed to store verification: %v", err)
 	} else {
 		s.logger.Printf("Stored verification for auth_id %s", authID)
+		stored = true
+		result = "pass"
 	}
 
 	return nil
@@ -237,6 +263,22 @@ func sanitizeSender(value string) string {
 		return addr.Address
 	}
 	return trimmed
+}
+
+func maskEmailLocalPart(value string) string {
+	addr := value
+	if parsed, err := mail.ParseAddress(value); err == nil && parsed.Address != "" {
+		addr = parsed.Address
+	}
+	at := strings.LastIndex(addr, "@")
+	if at < 0 {
+		return addr
+	}
+	domain := addr[at+1:]
+	if domain == "" {
+		return "***"
+	}
+	return "***" + "@" + domain
 }
 
 func extractDomain(value string) string {
