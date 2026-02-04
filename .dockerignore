@@ -1,0 +1,10 @@
+.git
+.gitignore
+.env
+*.log
+tmp/
+dist/
+bin/
+coverage/
+README.md
+LICENSE
