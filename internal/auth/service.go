@@ -11,11 +11,11 @@ import (
 	"time"
 
 	"mapae/internal/config"
-	"mapae/internal/storage/redis"
+	"mapae/internal/storage"
 )
 
 type Service struct {
-	redis    *redis.Client
+	store    storage.Store
 	settings *config.Settings
 }
 
@@ -41,8 +41,8 @@ type VerifiedPayload struct {
 var authIDRe = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
 var ErrInvalidAuthID = errors.New("invalid_auth_id")
 
-func New(redisClient *redis.Client, settings *config.Settings) *Service {
-	return &Service{redis: redisClient, settings: settings}
+func New(store storage.Store, settings *config.Settings) *Service {
+	return &Service{store: store, settings: settings}
 }
 
 func (s *Service) InitAuth(ctx context.Context) (*AuthInitResponse, error) {
@@ -64,10 +64,10 @@ func (s *Service) InitAuth(ctx context.Context) (*AuthInitResponse, error) {
 	}
 	authKey := fmt.Sprintf("auth:%s", authID)
 	nonceKey := fmt.Sprintf("nonce:%s", nonce)
-	if err := s.redis.SetEx(ctx, authKey, string(payloadJSON), s.settings.AuthTTLSeconds); err != nil {
+	if err := s.store.SetEx(ctx, authKey, string(payloadJSON), s.settings.AuthTTLSeconds); err != nil {
 		return nil, err
 	}
-	if err := s.redis.SetEx(ctx, nonceKey, authID, s.settings.AuthTTLSeconds); err != nil {
+	if err := s.store.SetEx(ctx, nonceKey, authID, s.settings.AuthTTLSeconds); err != nil {
 		return nil, err
 	}
 	smsBody := fmt.Sprintf("[MAPAE:%s]", nonce)
@@ -83,7 +83,7 @@ func (s *Service) CheckAuth(ctx context.Context, authID string) (map[string]any,
 	if !authIDRe.MatchString(authID) {
 		return nil, ErrInvalidAuthID
 	}
-	value, ok, err := s.redis.Get(ctx, fmt.Sprintf("auth:%s", authID))
+	value, ok, err := s.store.Get(ctx, fmt.Sprintf("auth:%s", authID))
 	if err != nil {
 		return nil, err
 	}
@@ -101,11 +101,11 @@ func (s *Service) CheckAuth(ctx context.Context, authID string) (map[string]any,
 }
 
 func (s *Service) LookupAuthIDByNonce(ctx context.Context, nonce string) (string, bool, error) {
-	return s.redis.Get(ctx, fmt.Sprintf("nonce:%s", nonce))
+	return s.store.Get(ctx, fmt.Sprintf("nonce:%s", nonce))
 }
 
 func (s *Service) Ping(ctx context.Context) error {
-	return s.redis.Ping(ctx)
+	return s.store.Ping(ctx)
 }
 
 func (s *Service) StoreVerified(ctx context.Context, authID string, phone, carrier *string) error {
@@ -124,7 +124,7 @@ func (s *Service) StoreVerified(ctx context.Context, authID string, phone, carri
 		return err
 	}
 	key := fmt.Sprintf("auth:%s", authID)
-	return s.redis.SetEx(ctx, key, string(payloadJSON), s.settings.VerifiedTTLSeconds)
+	return s.store.SetEx(ctx, key, string(payloadJSON), s.settings.VerifiedTTLSeconds)
 }
 
 func randomHex(bytesLen int) (string, error) {

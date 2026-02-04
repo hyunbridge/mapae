@@ -30,10 +30,10 @@ type backend struct {
 }
 
 type session struct {
-	server   *Server
-	mailFrom string
-	rcptTos  []string
-	peerIP   net.IP
+	server    *Server
+	mailFrom  string
+	rcptTos   []string
+	peerIP    net.IP
 	connStart time.Time
 }
 
@@ -220,7 +220,7 @@ func (s *Server) handleData(ctx context.Context, sess *session, raw []byte) erro
 
 	authID, ok, err := s.auth.LookupAuthIDByNonce(ctx, nonce)
 	if err != nil {
-		s.logger.Printf("Redis error while looking up nonce: %v", err)
+		s.logger.Printf("Store error while looking up nonce: %v", err)
 		return nil
 	}
 	if !ok {

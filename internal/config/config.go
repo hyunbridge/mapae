@@ -9,6 +9,7 @@ import (
 
 type Settings struct {
 	Debug              bool
+	UseInMemoryStore   bool
 	RedisURL           string
 	DumpInbound        bool
 	SMSInboundAddress  string
@@ -25,7 +26,8 @@ type Settings struct {
 func Load() *Settings {
 	return &Settings{
 		Debug:              envBool("DEBUG", false),
-		RedisURL:           envString("REDIS_URL", "redis://localhost:6379/0"),
+		UseInMemoryStore:   envBool("USE_IN_MEMORY_STORE", false),
+		RedisURL:           envString("REDIS_URL", ""),
 		DumpInbound:        envBool("DUMP_INBOUND", false),
 		SMSInboundAddress:  envString("SMS_INBOUND_ADDRESS", "verify@example.com"),
 		SMTPHost:           envString("SMTP_HOST", "0.0.0.0"),

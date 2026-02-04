@@ -44,12 +44,12 @@ func NewServer(settings *config.Settings, authService *auth.Service, logger *log
 
 	server := &Server{settings: settings, auth: authService, logger: logger, e: e}
 	e.Use(middleware.RequestLoggerWithConfig(middleware.RequestLoggerConfig{
-		LogMethod:    true,
-		LogURI:       true,
-		LogStatus:    true,
-		LogLatency:   true,
-		LogRemoteIP:  true,
-		LogProtocol:  true,
+		LogMethod:   true,
+		LogURI:      true,
+		LogStatus:   true,
+		LogLatency:  true,
+		LogRemoteIP: true,
+		LogProtocol: true,
 		LogValuesFunc: func(_ echo.Context, v middleware.RequestLoggerValues) error {
 			server.logger.Printf(
 				"INFO:     %s - %q %d %dms",
@@ -75,9 +75,9 @@ func (s *Server) healthHandler(c echo.Context) error {
 	ctx, cancel := context.WithTimeout(c.Request().Context(), 2*time.Second)
 	defer cancel()
 	if err := s.auth.Ping(ctx); err != nil {
-		return c.JSON(http.StatusServiceUnavailable, map[string]any{"status": "unhealthy", "redis": "down"})
+		return c.JSON(http.StatusServiceUnavailable, map[string]any{"status": "unhealthy", "storage": "down"})
 	}
-	return c.JSON(http.StatusOK, map[string]any{"status": "ok", "redis": "up"})
+	return c.JSON(http.StatusOK, map[string]any{"status": "ok", "storage": "up"})
 }
 
 func (s *Server) authInitHandler(c echo.Context) error {

@@ -6,6 +6,7 @@ toolchain go1.24.12
 
 require (
 	blitiri.com.ar/go/spf v1.5.1
+	github.com/allegro/bigcache/v3 v3.1.0
 	github.com/emersion/go-smtp v0.20.0
 	github.com/labstack/echo/v4 v4.12.0
 	github.com/redis/go-redis/v9 v9.6.1

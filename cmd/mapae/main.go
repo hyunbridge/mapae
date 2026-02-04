@@ -6,12 +6,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"mapae/internal/auth"
 	"mapae/internal/config"
 	"mapae/internal/logging"
+	"mapae/internal/storage"
+	"mapae/internal/storage/memory"
 	"mapae/internal/storage/redis"
 	httpapi "mapae/internal/transport/http"
 	"mapae/internal/transport/smtp"
@@ -21,12 +24,26 @@ func main() {
 	settings := config.Load()
 	logger := logging.New("mapae: ", settings.Debug)
 
-	redisClient, err := redis.New(settings.RedisURL)
-	if err != nil {
-		logger.Printf("Failed to initialize Redis client: %v", err)
-		os.Exit(1)
+	var store storage.Store
+	redisURL := strings.TrimSpace(settings.RedisURL)
+	if settings.UseInMemoryStore || redisURL == "" {
+		memStore, err := memory.New()
+		if err != nil {
+			logger.Printf("Failed to initialize in-memory store: %v", err)
+			os.Exit(1)
+		}
+		store = memStore
+		logger.Printf("Using in-memory store")
+	} else {
+		redisClient, err := redis.New(redisURL)
+		if err != nil {
+			logger.Printf("Failed to initialize Redis client: %v", err)
+			os.Exit(1)
+		}
+		store = redisClient
+		logger.Printf("Using Redis store")
 	}
-	authService := auth.New(redisClient, settings)
+	authService := auth.New(store, settings)
 
 	httpServer := httpapi.NewServer(settings, authService, logger)
 	smtpServer := smtp.NewServer(settings, authService, logger)
