@@ -221,14 +221,15 @@ func (s *Server) handleData(ctx context.Context, sess *session, raw []byte) erro
 	authID, ok, err := s.auth.LookupAuthIDByNonce(ctx, nonce)
 	if err != nil {
 		s.logger.Printf("Store error while looking up nonce: %v", err)
-		return nil
+		return &smtpserver.SMTPError{Code: 451, Message: "Temporary server error"}
 	}
 	if !ok {
 		s.logger.Printf("Nonce not found or expired: %s", nonce)
-		return nil
+		return &smtpserver.SMTPError{Code: 550, Message: "Invalid nonce"}
 	}
 	if err := s.auth.StoreVerified(ctx, authID, phone, carrier); err != nil {
 		s.logger.Printf("Failed to store verification: %v", err)
+		return &smtpserver.SMTPError{Code: 451, Message: "Temporary server error"}
 	} else {
 		s.logger.Printf("Stored verification for auth_id %s", authID)
 		stored = true
