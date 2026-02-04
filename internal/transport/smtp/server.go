@@ -23,6 +23,7 @@ type Server struct {
 	auth     *auth.Service
 	logger   *logging.Logger
 	server   *smtpserver.Server
+	baseCtx  context.Context
 }
 
 type backend struct {
@@ -35,6 +36,7 @@ type session struct {
 	rcptTos   []string
 	peerIP    net.IP
 	connStart time.Time
+	ctx       context.Context
 }
 
 func NewServer(settings *config.Settings, authService *auth.Service, logger *logging.Logger) *Server {
@@ -56,6 +58,7 @@ func (s *Server) Run(ctx context.Context) error {
 	server.MaxRecipients = 1
 	server.AllowInsecureAuth = true
 	s.server = server
+	s.baseCtx = ctx
 	go func() {
 		<-ctx.Done()
 		_ = server.Close()
@@ -74,7 +77,7 @@ func (b *backend) NewSession(c *smtpserver.Conn) (smtpserver.Session, error) {
 			}
 		}
 	}
-	return &session{server: b.server, peerIP: peerIP, connStart: time.Now()}, nil
+	return &session{server: b.server, peerIP: peerIP, connStart: time.Now(), ctx: b.server.baseCtx}, nil
 }
 
 func (s *session) Mail(from string, _ *smtpserver.MailOptions) error {
@@ -100,7 +103,14 @@ func (s *session) Data(r io.Reader) error {
 		s.server.logger.Printf("Message too large (limit=%d bytes)", s.server.settings.DataSizeLimitBytes)
 		return &smtpserver.SMTPError{Code: 552, Message: "Message size exceeds limit"}
 	}
-	return s.server.handleData(context.Background(), s, data)
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// 연결이 끊겨도 Downstream(SPF/DB) 작업이 10초 후 종료되도록 제한
+	opCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	return s.server.handleData(opCtx, s, data)
 }
 
 func (s *session) Reset() {
