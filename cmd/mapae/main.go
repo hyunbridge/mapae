@@ -61,6 +61,12 @@ func main() {
 	server := &http.Server{
 		Addr:    httpAddr,
 		Handler: httpServer.Handler(),
+
+		// Slowloris 공격이나 stuck 클라이언트에 대비
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
 	}
 
 	go func() {
