@@ -2,6 +2,7 @@ package smtp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -95,6 +96,28 @@ func (s *session) Rcpt(to string, _ *smtpserver.RcptOptions) error {
 }
 
 func (s *session) Data(r io.Reader) error {
+	ctx := s.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	// 연결이 끊겨도 하위(SPF/DB) 작업이 10초 후 종료되도록 제한
+	opCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	// DumpInbound가 꺼져 있으면, 본문 전체를 메모리에 올리지 않고 스트리밍으로 nonce(논스)만 추출한다.
+	if !s.server.settings.DumpInbound {
+		headerFrom, nonce, _, err := parser.StreamExtractHeaderFromAndNonce(r, s.server.settings.DataSizeLimitBytes)
+		if err != nil {
+			if errors.Is(err, parser.ErrMessageTooLarge) {
+				s.server.logger.Printf("Message too large (limit=%d bytes)", s.server.settings.DataSizeLimitBytes)
+				return &smtpserver.SMTPError{Code: 552, Message: "Message size exceeds limit"}
+			}
+			s.server.logger.Printf("Failed to parse inbound message: %v", err)
+			return &smtpserver.SMTPError{Code: 550, Message: "Invalid message"}
+		}
+		return s.server.handleParsed(opCtx, s, headerFrom, nonce, 0, "")
+	}
+
 	data, overLimit, err := readData(r, s.server.settings.DataSizeLimitBytes)
 	if err != nil {
 		return err
@@ -103,13 +126,6 @@ func (s *session) Data(r io.Reader) error {
 		s.server.logger.Printf("Message too large (limit=%d bytes)", s.server.settings.DataSizeLimitBytes)
 		return &smtpserver.SMTPError{Code: 552, Message: "Message size exceeds limit"}
 	}
-	ctx := s.ctx
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	// 연결이 끊겨도 Downstream(SPF/DB) 작업이 10초 후 종료되도록 제한
-	opCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
 	return s.server.handleData(opCtx, s, data)
 }
 
@@ -127,6 +143,18 @@ func (s *session) AuthPlain(username, password string) error {
 }
 
 func (s *Server) handleData(ctx context.Context, sess *session, raw []byte) error {
+	bodyText, headers := parser.ParseBody(raw)
+	headerFrom := headers["from"]
+	_, bodyBytes := parser.SplitHeaderBody(raw)
+	if headerFrom == "" {
+		headerFrom = parser.ExtractHeaderFromRaw(raw)
+	}
+
+	nonce := parser.FindNonceWithFallback(bodyText, bodyBytes)
+	return s.handleParsed(ctx, sess, headerFrom, nonce, len(raw), bodyText)
+}
+
+func (s *Server) handleParsed(ctx context.Context, sess *session, headerFrom, nonce string, rawLen int, bodyText string) error {
 	mailFrom := sess.mailFrom
 	peerIP := sess.peerIP
 	rcptList := strings.Join(sess.rcptTos, ",")
@@ -152,13 +180,6 @@ func (s *Server) handleData(ctx context.Context, sess *session, raw []byte) erro
 		}
 		s.logger.Printf(`INFO:     smtp %s - "RCPT TO: %s" result=%s stored=%t mail_from=%s dur=%s`, ip, rcptList, result, stored, maskedMailFrom, dur)
 	}()
-
-	bodyText, headers := parser.ParseBody(raw)
-	headerFrom := headers["from"]
-	_, bodyBytes := parser.SplitHeaderBody(raw)
-	if headerFrom == "" {
-		headerFrom = parser.ExtractHeaderFromRaw(raw)
-	}
 
 	envPhone, envCarrier := parser.ExtractPhoneAndCarrier(mailFrom)
 	hdrPhone, hdrCarrier := parser.ExtractPhoneAndCarrier(headerFrom)
@@ -218,11 +239,14 @@ func (s *Server) handleData(ctx context.Context, sess *session, raw []byte) erro
 		if headerFrom != "" {
 			s.logger.Printf("HEADER FROM: %s", headerFrom)
 		}
-		s.logger.Printf("RAW BYTES LEN: %d", len(raw))
-		s.logger.Printf("BODY (decoded): %s", bodyText)
+		if rawLen > 0 {
+			s.logger.Printf("RAW BYTES LEN: %d", rawLen)
+		}
+		if bodyText != "" {
+			s.logger.Printf("BODY (decoded): %s", bodyText)
+		}
 	}
 
-	nonce := parser.FindNonceWithFallback(bodyText, bodyBytes)
 	if nonce == "" {
 		s.logger.Printf("Nonce not found in message body")
 		return &smtpserver.SMTPError{Code: 550, Message: "Invalid nonce"}
@@ -240,12 +264,11 @@ func (s *Server) handleData(ctx context.Context, sess *session, raw []byte) erro
 	if err := s.auth.StoreVerified(ctx, authID, phone, carrier); err != nil {
 		s.logger.Printf("Failed to store verification: %v", err)
 		return &smtpserver.SMTPError{Code: 451, Message: "Temporary server error"}
-	} else {
-		s.logger.Printf("Stored verification for auth_id %s", authID)
-		stored = true
-		result = "pass"
 	}
 
+	s.logger.Printf("Stored verification for auth_id %s", authID)
+	stored = true
+	result = "pass"
 	return nil
 }
 
