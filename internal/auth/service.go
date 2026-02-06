@@ -38,6 +38,13 @@ type VerifiedPayload struct {
 	Timestamp string `json:"timestamp"`
 }
 
+type AuthCheckResponse struct {
+	Status    string `json:"status"`
+	Phone     string `json:"phone,omitempty"`
+	Carrier   string `json:"carrier,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
 var authIDRe = regexp.MustCompile(`^[0-9a-fA-F]{32}$`)
 var ErrInvalidAuthID = errors.New("invalid_auth_id")
 
@@ -79,7 +86,7 @@ func (s *Service) InitAuth(ctx context.Context) (*AuthInitResponse, error) {
 	}, nil
 }
 
-func (s *Service) CheckAuth(ctx context.Context, authID string) (map[string]any, error) {
+func (s *Service) CheckAuth(ctx context.Context, authID string) (*AuthCheckResponse, error) {
 	if !authIDRe.MatchString(authID) {
 		return nil, ErrInvalidAuthID
 	}
@@ -88,16 +95,16 @@ func (s *Service) CheckAuth(ctx context.Context, authID string) (map[string]any,
 		return nil, err
 	}
 	if !ok {
-		return map[string]any{"status": "expired"}, nil
+		return &AuthCheckResponse{Status: "expired"}, nil
 	}
-	var decoded map[string]any
+	var decoded AuthCheckResponse
 	if err := json.Unmarshal([]byte(value), &decoded); err != nil {
-		return map[string]any{"status": "waiting"}, nil
+		return &AuthCheckResponse{Status: "waiting"}, nil
 	}
-	if status, _ := decoded["status"].(string); status == "verified" {
-		return decoded, nil
+	if decoded.Status == "verified" {
+		return &decoded, nil
 	}
-	return map[string]any{"status": "waiting"}, nil
+	return &AuthCheckResponse{Status: "waiting"}, nil
 }
 
 func (s *Service) LookupAuthIDByNonce(ctx context.Context, nonce string) (string, bool, error) {

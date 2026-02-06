@@ -1,0 +1,42 @@
+name: Deploy Docs to Cloudflare Pages
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      deployments: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Generate Swagger JSON
+        run: |
+          go install github.com/swaggo/swag/cmd/swag@latest
+          swag init -g cmd/mapae/main.go --output ./docs --outputTypes json,yaml
+          rm -f docs/docs.go
+
+      - name: Build HTML with Redocly
+        run: |
+          mkdir -p dist
+          npx --yes @redocly/cli build-docs docs/swagger.json --output dist/index.html --title "MAPAE API Docs"
+
+      - name: Deploy to Cloudflare Pages
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          projectName: 'mapae-docs'
+          directory: 'dist'
+          gitHubToken: ${{ github.token }}

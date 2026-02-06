@@ -20,6 +20,12 @@ import (
 	"mapae/internal/transport/smtp"
 )
 
+// @title           Mapae API
+// @version         1.0
+// @description     MAPAE API Docs
+// @host            localhost:8000
+// @BasePath        /
+
 func main() {
 	settings := config.Load()
 	logger := logging.New("mapae: ", settings.Debug)

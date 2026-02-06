@@ -17,6 +17,11 @@ vendor/
 
 # Temp
 tmp/
+.gocache/
+.bin/
+.npm-cache/
+.npm-tmp/
+.home/
 
 # OS / IDE
 .DS_Store
@@ -24,3 +29,7 @@ Thumbs.db
 .idea/
 .vscode/
 *.iml
+
+# Documentation
+docs/
+dist/
