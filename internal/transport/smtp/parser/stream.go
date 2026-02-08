@@ -45,7 +45,7 @@ type nonceScanner struct {
 }
 
 func newNonceScanner() *nonceScanner {
-	return &nonceScanner{digits: make([]byte, 0, 96)}
+	return &nonceScanner{digits: make([]byte, 0, nonceHexLength)}
 }
 
 func (s *nonceScanner) Found() bool { return s.found != "" }
@@ -71,8 +71,8 @@ func (s *nonceScanner) scanByte(b byte) {
 		return
 	}
 
-	// 대소문자 구분 없이 "[MAPAE:" 패턴을 찾고, ']' 전까지 HEX 수집, 공백은 버림
-	// 최소 32바이트 이상일 때만 nonce로 인정
+	// 대소문자 구분 없이 "[MAPAE:" 패턴을 찾고, ']' 전까지 HEX 수집
+	// 정확히 64자리 HEX일 때만 nonce로 인정
 	switch s.state {
 	case 0:
 		if b == '[' {
@@ -120,14 +120,18 @@ func (s *nonceScanner) scanByte(b byte) {
 	case 7:
 		switch {
 		case b == ']':
-			if len(s.digits) >= 64 {
+			if len(s.digits) == nonceHexLength {
 				s.found = string(s.digits)
 				return
 			}
 			s.reset()
 		case b == ' ' || b == '\r' || b == '\n' || b == '\t':
-			// 무시
+			s.reset()
 		case (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F'):
+			if len(s.digits) >= nonceHexLength {
+				s.reset()
+				return
+			}
 			s.digits = append(s.digits, b)
 		default:
 			s.resetAndMaybeStart(b)

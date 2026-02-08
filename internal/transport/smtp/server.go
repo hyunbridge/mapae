@@ -247,8 +247,8 @@ func (s *Server) handleParsed(ctx context.Context, sess *session, headerFrom, no
 		}
 	}
 
-	if nonce == "" {
-		s.logger.Printf("Nonce not found in message body")
+	if !parser.IsValidNonce(nonce) {
+		s.logger.Printf("Invalid nonce format")
 		return &smtpserver.SMTPError{Code: 550, Message: "Invalid nonce"}
 	}
 

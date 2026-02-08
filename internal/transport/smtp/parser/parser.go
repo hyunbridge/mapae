@@ -3,11 +3,14 @@ package parser
 import (
 	"bytes"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"mime/quotedprintable"
 	"regexp"
 	"strings"
 )
+
+const nonceHexLength = 64
 
 var (
 	carrierDomains = map[string]string{
@@ -15,9 +18,23 @@ var (
 		"mmsmail.uplus.co.kr": "LGU+",
 		"mms.kt.co.kr":        "KT",
 	}
-	nonceRe = regexp.MustCompile(`(?is)\[MAPAE:([0-9a-f\s]{64,})\]`)
+	nonceRe = regexp.MustCompile(fmt.Sprintf(`(?i)\[MAPAE:([0-9a-f]{%d})\]`, nonceHexLength))
 	phoneRe = regexp.MustCompile(`([0-9-]{9,13})@([A-Za-z0-9.-]+)`)
 )
+
+func IsValidNonce(value string) bool {
+	if len(value) != nonceHexLength {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		b := value[i]
+		if (b >= '0' && b <= '9') || (b >= 'a' && b <= 'f') || (b >= 'A' && b <= 'F') {
+			continue
+		}
+		return false
+	}
+	return true
+}
 
 func normalizeDigits(value string) string {
 	var b strings.Builder
@@ -97,13 +114,10 @@ func findNonce(text string) string {
 	if len(match) < 2 {
 		return ""
 	}
-	raw := match[1]
-	return strings.Map(func(r rune) rune {
-		if r == ' ' || r == '\n' || r == '\r' || r == '\t' {
-			return -1
-		}
-		return r
-	}, raw)
+	if !IsValidNonce(match[1]) {
+		return ""
+	}
+	return match[1]
 }
 
 func FindNonceWithFallback(bodyText string, body []byte) string {
