@@ -1,5 +1,5 @@
 # Stage 1: Builder
-FROM --platform=$BUILDPLATFORM golang:1.24-trixie AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25-trixie AS builder
 
 WORKDIR /src
 
