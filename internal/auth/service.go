@@ -116,8 +116,8 @@ func (s *Service) CheckAuth(ctx context.Context, authID string) (*AuthCheckRespo
 	return &AuthCheckResponse{Status: "waiting"}, nil
 }
 
-func (s *Service) LookupAuthIDByNonce(ctx context.Context, nonce string) (string, bool, error) {
-	return s.store.Get(ctx, fmt.Sprintf("nonce:%s", nonce))
+func (s *Service) ConsumeAuthIDByNonce(ctx context.Context, nonce string) (string, bool, error) {
+	return s.store.Take(ctx, fmt.Sprintf("nonce:%s", nonce))
 }
 
 func (s *Service) Ping(ctx context.Context) error {

@@ -37,6 +37,17 @@ func (c *Client) Get(ctx context.Context, key string) (string, bool, error) {
 	return value, true, nil
 }
 
+func (c *Client) Take(ctx context.Context, key string) (string, bool, error) {
+	value, err := c.client.GetDel(ctx, key).Result()
+	if err == goredis.Nil {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return value, true, nil
+}
+
 func (c *Client) SetEx(ctx context.Context, key, value string, ttlSeconds int) error {
 	return c.client.SetEx(ctx, key, value, time.Duration(ttlSeconds)*time.Second).Err()
 }

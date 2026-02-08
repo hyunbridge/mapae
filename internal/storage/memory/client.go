@@ -57,6 +57,20 @@ func (c *Client) Get(_ context.Context, key string) (string, bool, error) {
 	return e.Value, true, nil
 }
 
+func (c *Client) Take(ctx context.Context, key string) (string, bool, error) {
+	value, ok, err := c.Get(ctx, key)
+	if err != nil {
+		return "", false, err
+	}
+	if !ok {
+		return "", false, nil
+	}
+	if err := c.cache.Delete(key); err != nil && !errors.Is(err, bigcache.ErrEntryNotFound) {
+		return "", false, err
+	}
+	return value, true, nil
+}
+
 func (c *Client) SetEx(_ context.Context, key, value string, ttlSeconds int) error {
 	if ttlSeconds <= 0 {
 		return fmt.Errorf("ttl must be positive: %d", ttlSeconds)

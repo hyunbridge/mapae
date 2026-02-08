@@ -252,9 +252,9 @@ func (s *Server) handleParsed(ctx context.Context, sess *session, headerFrom, no
 		return &smtpserver.SMTPError{Code: 550, Message: "Invalid nonce"}
 	}
 
-	authID, ok, err := s.auth.LookupAuthIDByNonce(ctx, nonce)
+	authID, ok, err := s.auth.ConsumeAuthIDByNonce(ctx, nonce)
 	if err != nil {
-		s.logger.Printf("Store error while looking up nonce: %v", err)
+		s.logger.Printf("Store error while consuming nonce: %v", err)
 		return &smtpserver.SMTPError{Code: 451, Message: "Temporary server error"}
 	}
 	if !ok {
