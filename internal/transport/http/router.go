@@ -73,6 +73,8 @@ func NewServer(settings *config.Settings, authService *auth.Service, logger *log
 	e.GET("/health", server.healthHandler)
 	e.POST("/auth/init", server.authInitHandler)
 	e.GET("/auth/check/:auth_id", server.authCheckHandler)
+	e.GET("/auth/check-signed/:auth_id", server.authCheckSignedHandler)
+	e.GET("/.well-known/jwks.json", server.jwksHandler)
 	return server
 }
 
@@ -138,6 +140,53 @@ func (s *Server) authCheckHandler(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, ErrorResponse{Detail: "서버 오류가 발생했습니다"})
 	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+// AuthCheckSignedHandler godoc
+// @Summary      Check Signed Result
+// @Description  인증 완료시 JWT가 포함된 상태 조회 (기존 응답 + token)
+// @Tags         auth
+// @Produce      json
+// @Param        auth_id   path      string  true  "인증 ID"
+// @Success      200       {object}  auth.AuthCheckResponse
+// @Failure      400       {object}  ErrorResponse
+// @Failure      500       {object}  ErrorResponse
+// @Failure      503       {object}  ErrorResponse
+// @Router       /auth/check-signed/{auth_id} [get]
+func (s *Server) authCheckSignedHandler(c echo.Context) error {
+	authID := strings.TrimSpace(c.Param("auth_id"))
+	if authID == "" {
+		return c.JSON(http.StatusBadRequest, ErrorResponse{Detail: "유효하지 않은 auth_id 입니다"})
+	}
+	resp, err := s.auth.CheckSigned(c.Request().Context(), authID)
+	if err != nil {
+		if err == auth.ErrInvalidAuthID {
+			return c.JSON(http.StatusBadRequest, ErrorResponse{Detail: "유효하지 않은 auth_id 입니다"})
+		}
+		if err == auth.ErrJWKSUnavailable {
+			return c.JSON(http.StatusServiceUnavailable, ErrorResponse{Detail: "JWT signer unavailable"})
+		}
+		s.logger.Printf("auth result error: %v", err)
+		return c.JSON(http.StatusInternalServerError, ErrorResponse{Detail: "서버 오류가 발생했습니다"})
+	}
+	return c.JSON(http.StatusOK, resp)
+}
+
+// JWKSHandler serves the public key set for JWT verification
+// @Summary      JWKS
+// @Description  공개용 JWK Set 제공
+// @Tags         auth
+// @Produce      json
+// @Success      200  {object}  map[string]interface{}
+// @Failure      503  {object}  ErrorResponse
+// @Router       /.well-known/jwks.json [get]
+func (s *Server) jwksHandler(c echo.Context) error {
+	data, err := s.auth.JWKS()
+	if err != nil {
+		s.logger.Printf("jwks error: %v", err)
+		return c.JSON(http.StatusServiceUnavailable, ErrorResponse{Detail: "JWKS unavailable"})
+	}
+	return c.Blob(http.StatusOK, "application/json", data)
 }
 
 func isAllowedOrigin(settings *config.Settings, origin string) bool {

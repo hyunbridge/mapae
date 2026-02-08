@@ -21,6 +21,9 @@ type Settings struct {
 	AuthTTLSeconds     int
 	VerifiedTTLSeconds int
 	DataSizeLimitBytes int
+	JWTPrivateKeyPEM   string
+	JWTIssuer          string
+	JWTTTLSeconds      int
 }
 
 func Load() *Settings {
@@ -38,6 +41,9 @@ func Load() *Settings {
 		AuthTTLSeconds:     envInt("AUTH_TTL_SECONDS", 600),
 		VerifiedTTLSeconds: envInt("VERIFIED_TTL_SECONDS", 300),
 		DataSizeLimitBytes: 128 * 1024,
+		JWTPrivateKeyPEM:   envString("JWT_PRIVATE_KEY", ""),
+		JWTIssuer:          envString("JWT_ISSUER", "https://example.com"),
+		JWTTTLSeconds:      envInt("JWT_TTL_SECONDS", 3600),
 	}
 }
 

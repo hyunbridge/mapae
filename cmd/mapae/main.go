@@ -49,7 +49,11 @@ func main() {
 		store = redisClient
 		logger.Printf("Using Redis store")
 	}
-	authService := auth.New(store, settings)
+	authService, err := auth.New(store, settings)
+	if err != nil {
+		logger.Printf("Failed to initialize auth service: %v", err)
+		os.Exit(1)
+	}
 
 	httpServer := httpapi.NewServer(settings, authService, logger)
 	smtpServer := smtp.NewServer(settings, authService, logger)
