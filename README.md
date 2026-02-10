@@ -34,20 +34,47 @@ MAPAE는 SMTP 서버와 HTTP API를 동시에 제공합니다.
 
 ## 설정 가이드 (.env)
 
+### 일반
+
 | 변수명 | 기본값 | 설명 |
 | :--- | :--- | :--- |
 | `DEBUG` | `false` | 디버그 로깅 활성화 |
+
+### 저장소
+
+| 변수명 | 기본값 | 설명 |
+| :--- | :--- | :--- |
 | `USE_IN_MEMORY_STORE` | `false` | `true`로 설정 시 Redis 대신 In-Memory 스토어 사용 |
 | `REDIS_URL` | *(빈 문자열)* | Redis 연결 주소 (비어 있으면 In-Memory 스토어로 폴백) |
+
+### SMTP 서버
+
+| 변수명 | 기본값 | 설명 |
+| :--- | :--- | :--- |
 | `SMTP_HOST` | `0.0.0.0` | SMTP 바인딩 호스트 |
 | `SMTP_PORT` | `2525` | SMTP 바인딩 포트 |
-| `HTTP_HOST` | `0.0.0.0` | HTTP 바인딩 호스트 |
-| `HTTP_PORT` | `8000` | HTTP 바인딩 포트 |
 | `SMS_INBOUND_ADDRESS` | `verify@example.com` | 인바운드 수신 주소 (정확히 일치하지 않으면 수신 거부) |
 | `DUMP_INBOUND` | `false` | 수신된 이메일의 헤더/본문을 로그에 출력 |
+
+### HTTP 서버
+
+| 변수명 | 기본값 | 설명 |
+| :--- | :--- | :--- |
+| `HTTP_HOST` | `0.0.0.0` | HTTP 바인딩 호스트 |
+| `HTTP_PORT` | `8000` | HTTP 바인딩 포트 |
 | `CORS_ALLOW_ORIGINS` | `["*"]` | CORS 허용 Origin 목록 (JSON 배열 또는 쉼표 구분) |
+
+### 인증
+
+| 변수명 | 기본값 | 설명 |
+| :--- | :--- | :--- |
 | `AUTH_TTL_SECONDS` | `600` | 인증 시도(Nonce) 유효 시간 (초) |
 | `VERIFIED_TTL_SECONDS` | `300` | 인증 완료 후 결과 보관 시간 (초) |
+
+### JWT
+
+| 변수명 | 기본값 | 설명 |
+| :--- | :--- | :--- |
 | `JWT_PRIVATE_KEY` | *(빈 문자열)* | Ed25519 PEM 개인키 (설정하지 않으면 JWT 서명 기능 비활성화) |
 | `JWT_ISSUER` | `https://example.com` | JWT `iss` 클레임 값 |
 | `JWT_TTL_SECONDS` | `3600` | 발급된 JWT의 유효 시간 (초) |
