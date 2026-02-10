@@ -3,6 +3,8 @@ package memory
 import (
 	"context"
 	"encoding/json"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -87,5 +89,40 @@ func TestGetInvalidPayloadReturnsError(t *testing.T) {
 
 	if _, _, err := c.Get(context.Background(), "broken"); err == nil {
 		t.Fatalf("Get() should fail for invalid payload")
+	}
+}
+
+func TestTakeIsAtomicUnderConcurrency(t *testing.T) {
+	c, err := New()
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	ctx := context.Background()
+	if err := c.SetEx(ctx, "nonce", "auth-id", 60); err != nil {
+		t.Fatalf("SetEx() error = %v", err)
+	}
+
+	const workers = 64
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	var successCount int32
+
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			_, ok, err := c.Take(ctx, "nonce")
+			if err != nil {
+				t.Errorf("Take() error = %v", err)
+				return
+			}
+			if ok {
+				atomic.AddInt32(&successCount, 1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := atomic.LoadInt32(&successCount); got != 1 {
+		t.Fatalf("successful Take count = %d, want 1", got)
 	}
 }
