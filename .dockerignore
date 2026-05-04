@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env
+.env.*
+!.env.example
+.DS_Store
+**/.DS_Store
+target/
+*.log
+tmp/
+dist/
+bin/
+coverage/
+README.md
+LICENSE
+docs/

@@ -1,0 +1,35 @@
+# Secrets / env
+.env
+.env.*
+!.env.example
+.envrc
+
+# Build outputs
+bin/
+target/
+*.exe
+*.test
+*.out
+coverage/
+
+# Logs
+*.log
+
+# Temp
+tmp/
+.gocache/
+.bin/
+.npm-cache/
+.npm-tmp/
+.home/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+
+# Documentation
+docs/
+dist/

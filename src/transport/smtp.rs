@@ -1,0 +1,1053 @@
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
+use std::time::Duration;
+use std::{io, io::ErrorKind};
+
+use anyhow::Context;
+use mail_auth::{spf::verify::SpfParameters, MessageAuthenticator, SpfResult};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::watch;
+use tokio::sync::{mpsc, Semaphore};
+use tokio::task::JoinSet;
+use tokio::time::timeout;
+use tracing::{error, info, warn};
+
+use super::{parser, DATA_SIZE_LIMIT_BYTES};
+use crate::auth::Service;
+use crate::config::Settings;
+
+const APP_NAME: &str = "MAPAE";
+const SMTP_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
+const SMTP_DATA_TIMEOUT: Duration = Duration::from_secs(300);
+const SMTP_SESSION_TIMEOUT: Duration = Duration::from_secs(900);
+const SMTP_MAX_LINE_BYTES: usize = 8192;
+
+/// 통신사로부터 발송되는 MMS 이메일을 수신하는 비동기 SMTP 데몬을 실행합니다.
+///
+/// 연결 제한(Connection Limit) 및 타임아웃을 적용하여 DoS 공격을 방어하며,
+/// 수신된 이메일은 SPF(Sender Policy Framework) 검증을 거쳐 인증에 활용됩니다.
+pub async fn run(
+    config: Arc<Settings>,
+    auth_service: Arc<Service>,
+    mut shutdown: watch::Receiver<bool>,
+) -> anyhow::Result<()> {
+    let bind_addr = format!("{}:{}", config.smtp_host, config.smtp_port);
+    let listener = TcpListener::bind(&bind_addr)
+        .await
+        .with_context(|| format!("SMTP bind error: {bind_addr}"))?;
+
+    let authenticator =
+        MessageAuthenticator::new_system_conf().context("SPF resolver init error")?;
+
+    info!("SMTP server listening on {}", bind_addr);
+
+    let connection_limit = Arc::new(Semaphore::new(config.smtp_max_connections));
+    let mut sessions = JoinSet::new();
+
+    loop {
+        tokio::select! {
+            biased;
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    info!("SMTP shutdown requested");
+                    break;
+                }
+            }
+            result = sessions.join_next(), if !sessions.is_empty() => {
+                if let Some(Err(err)) = result {
+                    warn!("SMTP session task failed: {}", err);
+                }
+            }
+            accept = listener.accept() => {
+                let (stream, peer_addr) = match accept {
+                    Ok(conn) => conn,
+                    Err(err) => {
+                        warn!("SMTP accept error: {}", err);
+                        continue;
+                    }
+                };
+                info!("New SMTP session from {}", peer_addr);
+
+                let Ok(permit) = connection_limit.clone().try_acquire_owned() else {
+                    warn!(
+                        "Rejected SMTP session from {}: connection limit reached",
+                        peer_addr
+                    );
+                    sessions.spawn(reject_smtp_session(stream));
+                    continue;
+                };
+
+                if let Err(err) = stream.set_nodelay(true) {
+                    warn!("SMTP set_nodelay failed for {}: {}", peer_addr, err);
+                }
+
+                let config = config.clone();
+                let auth_service = auth_service.clone();
+                let authenticator = authenticator.clone();
+                sessions.spawn(async move {
+                    let _permit = permit;
+                    match timeout(
+                        SMTP_SESSION_TIMEOUT,
+                        handle_session(stream, peer_addr, config, auth_service, authenticator),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(err)) => warn!("SMTP session error from {}: {}", peer_addr, err),
+                        Err(_) => warn!("SMTP session timed out from {}", peer_addr),
+                    }
+                });
+            }
+        }
+    }
+
+    while let Some(result) = sessions.join_next().await {
+        if let Err(err) = result {
+            warn!("SMTP session task failed: {}", err);
+        }
+    }
+
+    Ok(())
+}
+
+async fn reject_smtp_session(mut stream: TcpStream) {
+    if let Err(err) = stream
+        .write_all(b"421 4.3.2 Too many connections\r\n")
+        .await
+    {
+        warn!("SMTP reject write failed: {}", err);
+    }
+    if let Err(err) = stream.shutdown().await {
+        warn!("SMTP reject shutdown failed: {}", err);
+    }
+}
+
+struct SmtpSession {
+    peer_addr: SocketAddr,
+    mail_from: String,
+    helo_domain: String,
+    mail_seen: bool,
+    rcpt_count: usize,
+}
+
+impl SmtpSession {
+    fn new(peer_addr: SocketAddr) -> Self {
+        Self {
+            peer_addr,
+            mail_from: String::new(),
+            helo_domain: String::new(),
+            mail_seen: false,
+            rcpt_count: 0,
+        }
+    }
+
+    fn reset_transaction(&mut self) {
+        self.mail_from.clear();
+        self.mail_seen = false;
+        self.rcpt_count = 0;
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct SmtpReply {
+    status: u16,
+    message: &'static str,
+    enhanced: Option<&'static str>,
+}
+
+impl SmtpReply {
+    const fn new(status: u16, message: &'static str, enhanced: Option<&'static str>) -> Self {
+        Self {
+            status,
+            message,
+            enhanced,
+        }
+    }
+
+    fn line(&self) -> String {
+        if let Some(enhanced) = self.enhanced {
+            format!("{} {} {}\r\n", self.status, enhanced, self.message)
+        } else {
+            format!("{} {}\r\n", self.status, self.message)
+        }
+    }
+}
+
+struct ChannelDataReader {
+    rx: mpsc::Receiver<io::Result<Vec<u8>>>,
+    pending: Vec<u8>,
+    offset: usize,
+}
+
+impl ChannelDataReader {
+    fn new(rx: mpsc::Receiver<io::Result<Vec<u8>>>) -> Self {
+        Self {
+            rx,
+            pending: Vec::new(),
+            offset: 0,
+        }
+    }
+}
+
+impl io::Read for ChannelDataReader {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+
+        loop {
+            if self.offset < self.pending.len() {
+                let available = self.pending.len() - self.offset;
+                let to_copy = available.min(out.len());
+                out[..to_copy].copy_from_slice(&self.pending[self.offset..self.offset + to_copy]);
+                self.offset += to_copy;
+                if self.offset == self.pending.len() {
+                    self.pending.clear();
+                    self.offset = 0;
+                }
+                return Ok(to_copy);
+            }
+
+            match self.rx.blocking_recv() {
+                Some(Ok(chunk)) if chunk.is_empty() => continue,
+                Some(Ok(chunk)) => {
+                    self.pending = chunk;
+                    self.offset = 0;
+                }
+                Some(Err(err)) => return Err(err),
+                None => return Ok(0),
+            }
+        }
+    }
+}
+
+async fn handle_session(
+    stream: TcpStream,
+    peer_addr: SocketAddr,
+    config: Arc<Settings>,
+    auth_service: Arc<Service>,
+    authenticator: MessageAuthenticator,
+) -> io::Result<()> {
+    let mut reader = BufReader::new(stream);
+    let mut session = SmtpSession::new(peer_addr);
+
+    write_line(&mut reader, &format!("220 {APP_NAME} ESMTP ready\r\n")).await?;
+
+    loop {
+        let line =
+            match read_line_limited(&mut reader, SMTP_MAX_LINE_BYTES, SMTP_COMMAND_TIMEOUT).await {
+                Ok(Some(line)) => line,
+                Ok(None) => return Ok(()),
+                Err(err) if err.kind() == ErrorKind::InvalidData => {
+                    write_reply(
+                        &mut reader,
+                        SmtpReply::new(500, "Line too long", Some("5.5.2")),
+                    )
+                    .await?;
+                    return Ok(());
+                }
+                Err(err) if err.kind() == ErrorKind::TimedOut => return Ok(()),
+                Err(err) => return Err(err),
+            };
+
+        let command = String::from_utf8_lossy(parser::trim_crlf(&line));
+        let upper = command.to_ascii_uppercase();
+        if upper.starts_with("EHLO ") || upper == "EHLO" {
+            session.helo_domain = command[4..].trim().to_string();
+            write_line(
+                &mut reader,
+                &format!("250-{APP_NAME}\r\n250 SIZE {DATA_SIZE_LIMIT_BYTES}\r\n"),
+            )
+            .await?;
+        } else if upper.starts_with("HELO ") || upper == "HELO" {
+            session.helo_domain = command[4..].trim().to_string();
+            write_line(&mut reader, &format!("250 {APP_NAME}\r\n")).await?;
+        } else if upper.starts_with("MAIL FROM:") {
+            let Some(from) = parse_smtp_path(&command[10..]) else {
+                write_reply(
+                    &mut reader,
+                    SmtpReply::new(501, "Invalid sender", Some("5.1.7")),
+                )
+                .await?;
+                continue;
+            };
+            session.mail_from = from;
+            session.mail_seen = true;
+            session.rcpt_count = 0;
+            write_reply(&mut reader, SmtpReply::new(250, "OK", None)).await?;
+        } else if upper.starts_with("RCPT TO:") {
+            if !session.mail_seen {
+                write_reply(
+                    &mut reader,
+                    SmtpReply::new(503, "Need MAIL FROM first", Some("5.5.1")),
+                )
+                .await?;
+                continue;
+            }
+
+            let Some(to) = parse_smtp_path(&command[8..]) else {
+                write_reply(
+                    &mut reader,
+                    SmtpReply::new(501, "Invalid recipient", Some("5.1.3")),
+                )
+                .await?;
+                continue;
+            };
+            match handle_rcpt(&config, &session, &to) {
+                Ok(()) => {
+                    session.rcpt_count += 1;
+                    write_reply(&mut reader, SmtpReply::new(250, "OK", None)).await?;
+                }
+                Err(reply) => write_reply(&mut reader, reply).await?,
+            }
+        } else if upper == "DATA" {
+            if !session.mail_seen || session.rcpt_count == 0 {
+                write_reply(
+                    &mut reader,
+                    SmtpReply::new(503, "Need MAIL FROM and RCPT TO first", Some("5.5.1")),
+                )
+                .await?;
+                continue;
+            }
+
+            write_reply(
+                &mut reader,
+                SmtpReply::new(354, "End data with <CR><LF>.<CR><LF>", None),
+            )
+            .await?;
+            let result = if config.dump_inbound {
+                match read_data(&mut reader).await {
+                    Ok(data) => {
+                        process_email_data(&config, &auth_service, &authenticator, &session, data)
+                            .await
+                    }
+                    Err(reply) => Err(reply),
+                }
+            } else {
+                match stream_extract_data(&mut reader).await {
+                    Ok(extract_result) => {
+                        process_extracted_email(
+                            &config,
+                            &auth_service,
+                            &authenticator,
+                            &session,
+                            extract_result,
+                            None,
+                        )
+                        .await
+                    }
+                    Err(reply) => Err(reply),
+                }
+            };
+
+            match result {
+                Ok(()) => write_reply(&mut reader, SmtpReply::new(250, "OK", None)).await?,
+                Err(reply) => {
+                    let close_after_reply = reply.status == 552;
+                    write_reply(&mut reader, reply).await?;
+                    if close_after_reply {
+                        return Ok(());
+                    }
+                }
+            }
+            session.reset_transaction();
+        } else if upper == "RSET" {
+            session.reset_transaction();
+            write_reply(&mut reader, SmtpReply::new(250, "OK", None)).await?;
+        } else if upper == "NOOP" {
+            write_reply(&mut reader, SmtpReply::new(250, "OK", None)).await?;
+        } else if upper == "QUIT" {
+            write_reply(&mut reader, SmtpReply::new(221, "Bye", None)).await?;
+            return Ok(());
+        } else {
+            write_reply(
+                &mut reader,
+                SmtpReply::new(502, "Command not implemented", Some("5.5.1")),
+            )
+            .await?;
+        }
+    }
+}
+
+async fn write_reply(reader: &mut BufReader<TcpStream>, reply: SmtpReply) -> io::Result<()> {
+    write_line(reader, &reply.line()).await
+}
+
+async fn write_line(reader: &mut BufReader<TcpStream>, line: &str) -> io::Result<()> {
+    let stream = reader.get_mut();
+    stream.write_all(line.as_bytes()).await?;
+    stream.flush().await
+}
+
+async fn read_data(reader: &mut BufReader<TcpStream>) -> Result<Vec<u8>, SmtpReply> {
+    let mut data = Vec::new();
+    let mut too_large = false;
+
+    loop {
+        let line = read_line_limited(reader, DATA_SIZE_LIMIT_BYTES + 3, SMTP_DATA_TIMEOUT)
+            .await
+            .map_err(|err| {
+                if err.kind() == ErrorKind::InvalidData {
+                    SmtpReply::new(552, "Message size exceeds limit", Some("5.3.4"))
+                } else {
+                    SmtpReply::new(451, "Temporary server error", Some("4.3.0"))
+                }
+            })?;
+        let Some(line) = line else {
+            return Err(SmtpReply::new(550, "Invalid message", Some("5.6.0")));
+        };
+
+        let trimmed = parser::trim_crlf(&line);
+        if trimmed == b"." {
+            break;
+        }
+
+        let body_line = if line.starts_with(b"..") {
+            &line[1..]
+        } else {
+            line.as_slice()
+        };
+        if data.len().saturating_add(body_line.len()) > DATA_SIZE_LIMIT_BYTES {
+            too_large = true;
+        } else if !too_large {
+            data.extend_from_slice(body_line);
+        }
+    }
+
+    if too_large {
+        Err(SmtpReply::new(
+            552,
+            "Message size exceeds limit",
+            Some("5.3.4"),
+        ))
+    } else {
+        Ok(data)
+    }
+}
+
+async fn stream_extract_data(
+    reader: &mut BufReader<TcpStream>,
+) -> Result<parser::ExtractResult, SmtpReply> {
+    let (tx, rx) = mpsc::channel::<io::Result<Vec<u8>>>(8);
+    let parser_task = tokio::task::spawn_blocking(move || {
+        parser::extract_header_from_and_nonce_stream(
+            ChannelDataReader::new(rx),
+            DATA_SIZE_LIMIT_BYTES,
+        )
+    });
+
+    let mut tx = Some(tx);
+    let mut read_error = None;
+    let mut parser_finished_before_terminator = false;
+
+    loop {
+        if parser_task.is_finished() {
+            parser_finished_before_terminator = true;
+            break;
+        }
+
+        let line =
+            match read_line_limited(reader, DATA_SIZE_LIMIT_BYTES + 3, SMTP_DATA_TIMEOUT).await {
+                Ok(Some(line)) => line,
+                Ok(None) => {
+                    read_error = Some(SmtpReply::new(550, "Invalid message", Some("5.6.0")));
+                    break;
+                }
+                Err(err) => {
+                    read_error = Some(if err.kind() == ErrorKind::InvalidData {
+                        SmtpReply::new(552, "Message size exceeds limit", Some("5.3.4"))
+                    } else {
+                        SmtpReply::new(451, "Temporary server error", Some("4.3.0"))
+                    });
+                    break;
+                }
+            };
+
+        let trimmed = parser::trim_crlf(&line);
+        if trimmed == b"." {
+            break;
+        }
+
+        let body_line = if line.starts_with(b"..") {
+            &line[1..]
+        } else {
+            line.as_slice()
+        };
+
+        let Some(sender) = tx.as_ref() else {
+            parser_finished_before_terminator = true;
+            break;
+        };
+        if sender.send(Ok(body_line.to_vec())).await.is_err() {
+            parser_finished_before_terminator = true;
+            break;
+        }
+    }
+
+    drop(tx.take());
+
+    if let Some(reply) = read_error {
+        let _ = parser_task.await;
+        return Err(reply);
+    }
+
+    if parser_finished_before_terminator {
+        if let Err(reply) = drain_data_to_terminator(reader).await {
+            let _ = parser_task.await;
+            return Err(reply);
+        }
+    }
+
+    parser_task
+        .await
+        .map_err(|err| {
+            error!("MIME parser task failed: {}", err);
+            SmtpReply::new(451, "Temporary server error", Some("4.3.0"))
+        })?
+        .map_err(|err| {
+            error!("MIME parse error: {}", err);
+            map_stream_parse_error(&err)
+        })
+}
+
+async fn drain_data_to_terminator(reader: &mut BufReader<TcpStream>) -> Result<(), SmtpReply> {
+    let mut bytes_read = 0usize;
+
+    loop {
+        let line = read_line_limited(reader, DATA_SIZE_LIMIT_BYTES + 3, SMTP_DATA_TIMEOUT)
+            .await
+            .map_err(|err| {
+                if err.kind() == ErrorKind::InvalidData {
+                    SmtpReply::new(552, "Message size exceeds limit", Some("5.3.4"))
+                } else {
+                    SmtpReply::new(451, "Temporary server error", Some("4.3.0"))
+                }
+            })?;
+        let Some(line) = line else {
+            return Err(SmtpReply::new(550, "Invalid message", Some("5.6.0")));
+        };
+
+        if parser::trim_crlf(&line) == b"." {
+            return Ok(());
+        }
+
+        bytes_read = bytes_read.saturating_add(line.len());
+        if bytes_read > DATA_SIZE_LIMIT_BYTES {
+            return Err(SmtpReply::new(
+                552,
+                "Message size exceeds limit",
+                Some("5.3.4"),
+            ));
+        }
+    }
+}
+
+async fn read_line_limited(
+    reader: &mut BufReader<TcpStream>,
+    limit: usize,
+    read_timeout: Duration,
+) -> io::Result<Option<Vec<u8>>> {
+    let mut line = Vec::new();
+    let fut = async {
+        let mut taker = (reader as &mut BufReader<TcpStream>).take((limit + 1) as u64);
+        taker.read_until(b'\n', &mut line).await
+    };
+
+    match timeout(read_timeout, fut).await {
+        Ok(Ok(0)) => {
+            if line.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(line))
+            }
+        }
+        Ok(Ok(_)) => {
+            if line.len() > limit {
+                Err(io::Error::new(ErrorKind::InvalidData, "SMTP line too long"))
+            } else {
+                Ok(Some(line))
+            }
+        }
+        Ok(Err(err)) => Err(err),
+        Err(_) => Err(io::Error::new(ErrorKind::TimedOut, "SMTP read timeout")),
+    }
+}
+
+fn parse_smtp_path(value: &str) -> Option<String> {
+    let value = value.trim();
+    if let Some(rest) = value.strip_prefix('<') {
+        let end = rest.find('>')?;
+        return Some(rest[..end].trim().to_string());
+    }
+
+    value
+        .split_whitespace()
+        .next()
+        .map(|addr| addr.trim().to_string())
+        .filter(|addr| !addr.is_empty())
+}
+
+fn handle_rcpt(config: &Settings, session: &SmtpSession, to: &str) -> Result<(), SmtpReply> {
+    let inbound = config.sms_inbound_address.trim();
+    if !is_rcpt_allowed(inbound, to.trim()) {
+        warn!("Rejected RCPT TO for {} from {}", to, session.peer_addr);
+        return Err(SmtpReply::new(
+            550,
+            "Not relaying to that address",
+            Some("5.7.1"),
+        ));
+    }
+
+    if session.rcpt_count >= 1 {
+        return Err(SmtpReply::new(452, "Too many recipients", Some("4.5.3")));
+    }
+
+    Ok(())
+}
+
+async fn process_email_data(
+    config: &Settings,
+    auth_service: &Service,
+    authenticator: &MessageAuthenticator,
+    session: &SmtpSession,
+    data: Vec<u8>,
+) -> Result<(), SmtpReply> {
+    let extract_result =
+        parser::extract_header_from_and_nonce(data.as_slice(), DATA_SIZE_LIMIT_BYTES).map_err(
+            |e| {
+                error!("MIME parse error: {}", e);
+                map_stream_parse_error(&e)
+            },
+        )?;
+
+    process_extracted_email(
+        config,
+        auth_service,
+        authenticator,
+        session,
+        extract_result,
+        Some(data.as_slice()),
+    )
+    .await
+}
+
+async fn process_extracted_email(
+    config: &Settings,
+    auth_service: &Service,
+    authenticator: &MessageAuthenticator,
+    session: &SmtpSession,
+    extract_result: parser::ExtractResult,
+    data_preview: Option<&[u8]>,
+) -> Result<(), SmtpReply> {
+    let peer = session.peer_addr.to_string();
+    let header_from = extract_result.header_from;
+    let nonce = extract_result.nonce;
+    let bytes_read = extract_result.bytes_read;
+
+    if config.dump_inbound {
+        info!(
+            "MAIL FROM: {} | HEADER FROM: {} | PEER: {}",
+            session.mail_from, header_from, peer
+        );
+        if let Some(data) = data_preview {
+            info!(
+                "BODY: {}",
+                String::from_utf8_lossy(data)
+                    .chars()
+                    .take(500)
+                    .collect::<String>()
+            );
+        }
+    }
+
+    let (env_phone, env_carrier) = parser::extract_phone_and_carrier(&session.mail_from);
+    let (hdr_phone, hdr_carrier) = parser::extract_phone_and_carrier(&header_from);
+
+    let env_sender = normalize_email_address(&session.mail_from);
+    let hdr_sender = normalize_email_address(&header_from);
+    let peer_ip = session.peer_addr.ip();
+    let host_domain = smtp_host_domain(config);
+    let env_spf = check_spf(
+        authenticator,
+        peer_ip,
+        env_sender.as_deref(),
+        session.helo_domain.as_str(),
+        host_domain.as_str(),
+    )
+    .await;
+    let env_usable = env_carrier.is_some() && env_spf.pass;
+    let hdr_spf = if env_usable {
+        None
+    } else {
+        Some(
+            check_spf(
+                authenticator,
+                peer_ip,
+                hdr_sender.as_deref(),
+                session.helo_domain.as_str(),
+                host_domain.as_str(),
+            )
+            .await,
+        )
+    };
+    let hdr_pass = hdr_spf.as_ref().is_some_and(|check| check.pass);
+
+    if !(env_spf.pass || hdr_pass) {
+        if env_spf.temp_error || hdr_spf.as_ref().is_some_and(|check| check.temp_error) {
+            warn!(
+                "SPF temperror: ip={} mail_from={} header_from={}",
+                peer, session.mail_from, header_from
+            );
+            return Err(SmtpReply::new(451, "SPF temperror", Some("4.7.0")));
+        }
+
+        warn!(
+            "SPF fail: ip={} mail_from={} header_from={}",
+            peer, session.mail_from, header_from
+        );
+        return Err(SmtpReply::new(550, "SPF fail", Some("5.7.1")));
+    }
+
+    let (phone, carrier) = if env_usable {
+        (env_phone, env_carrier)
+    } else if hdr_carrier.is_some() && hdr_pass {
+        (hdr_phone, hdr_carrier)
+    } else {
+        (None, None)
+    };
+
+    if carrier.is_none() {
+        warn!("Carrier domain not recognized from {}", peer);
+        return Err(SmtpReply::new(550, "Invalid carrier domain", Some("5.7.1")));
+    }
+
+    if !parser::is_valid_nonce(&nonce) {
+        warn!("Invalid nonce format from {}", peer);
+        return Err(SmtpReply::new(550, "Invalid nonce", Some("5.7.1")));
+    }
+
+    let (auth_id, ok) = auth_service
+        .consume_auth_id_by_nonce(&nonce)
+        .await
+        .map_err(|e| {
+            error!("Store error while consuming nonce: {}", e);
+            SmtpReply::new(451, "Temporary server error", Some("4.3.0"))
+        })?;
+
+    if !ok {
+        warn!("Nonce not found or expired: {}", nonce);
+        return Err(SmtpReply::new(550, "Invalid nonce", Some("5.7.1")));
+    }
+
+    auth_service
+        .store_verified(&auth_id, phone.as_deref(), carrier.as_deref())
+        .await
+        .map_err(|e| {
+            error!("Failed to store verification: {}", e);
+            SmtpReply::new(451, "Temporary server error", Some("4.3.0"))
+        })?;
+
+    info!(
+        "Stored verification for auth_id={} phone={:?} carrier={:?} bytes_read={}",
+        auth_id, phone, carrier, bytes_read
+    );
+    Ok(())
+}
+
+fn normalize_email_address(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "<>" {
+        return None;
+    }
+
+    if let Ok(addrs) = mailparse::addrparse(trimmed) {
+        if !addrs.is_empty() {
+            match &addrs[0] {
+                mailparse::MailAddr::Single(s) if !s.addr.is_empty() => {
+                    return Some(s.addr.clone());
+                }
+                mailparse::MailAddr::Group(g) => {
+                    if let Some(first) = g.addrs.first() {
+                        if !first.addr.is_empty() {
+                            return Some(first.addr.clone());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Some(trimmed.to_string())
+}
+
+fn map_stream_parse_error(err: &io::Error) -> SmtpReply {
+    if parser::is_message_too_large(err) {
+        return SmtpReply::new(552, "Message size exceeds limit", Some("5.3.4"));
+    }
+
+    SmtpReply::new(550, "Invalid message", Some("5.6.0"))
+}
+
+fn is_rcpt_allowed(inbound: &str, to: &str) -> bool {
+    inbound.trim().is_empty() || to.trim().eq_ignore_ascii_case(inbound.trim())
+}
+
+struct SpfCheck {
+    pass: bool,
+    temp_error: bool,
+}
+
+async fn check_spf(
+    authenticator: &MessageAuthenticator,
+    peer_ip: IpAddr,
+    sender: Option<&str>,
+    helo_domain: &str,
+    host_domain: &str,
+) -> SpfCheck {
+    let Some(sender) = sender.filter(|sender| !sender.is_empty()) else {
+        return SpfCheck {
+            pass: false,
+            temp_error: false,
+        };
+    };
+
+    let result = authenticator
+        .verify_spf(SpfParameters::verify_mail_from(
+            peer_ip,
+            helo_domain,
+            host_domain,
+            sender,
+        ))
+        .await
+        .result();
+
+    SpfCheck {
+        pass: result == SpfResult::Pass,
+        temp_error: result == SpfResult::TempError,
+    }
+}
+
+fn smtp_host_domain(config: &Settings) -> String {
+    normalize_email_address(&config.sms_inbound_address)
+        .and_then(|address| {
+            address
+                .rsplit_once('@')
+                .map(|(_, domain)| domain.trim().to_string())
+        })
+        .filter(|domain| !domain.is_empty())
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        is_rcpt_allowed, map_stream_parse_error, normalize_email_address, parse_smtp_path, parser,
+        read_data, read_line_limited, smtp_host_domain, stream_extract_data, SmtpReply, APP_NAME,
+        DATA_SIZE_LIMIT_BYTES, SMTP_COMMAND_TIMEOUT, SMTP_MAX_LINE_BYTES,
+    };
+    use crate::config::Settings;
+    use std::io;
+    use tokio::io::{AsyncWriteExt, BufReader};
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn normalize_email_address_accepts_common_smtp_paths() {
+        assert_eq!(
+            normalize_email_address("<verify@example.com>").as_deref(),
+            Some("verify@example.com")
+        );
+        assert_eq!(
+            normalize_email_address("verify@example.com").as_deref(),
+            Some("verify@example.com")
+        );
+        assert_eq!(
+            normalize_email_address("Display <verify@example.com>").as_deref(),
+            Some("verify@example.com")
+        );
+    }
+
+    #[test]
+    fn normalize_email_address_rejects_empty_sender() {
+        assert_eq!(normalize_email_address("<>"), None);
+        assert_eq!(normalize_email_address("  "), None);
+    }
+
+    #[test]
+    fn normalize_email_address_falls_back_to_trimmed_value() {
+        assert_eq!(
+            normalize_email_address("not-an-rfc5322 address").as_deref(),
+            Some("not-an-rfc5322 address")
+        );
+    }
+
+    #[test]
+    fn smtp_host_domain_uses_inbound_domain() {
+        let settings = Settings {
+            sms_inbound_address: "verify@example.com".to_string(),
+            ..Settings::default()
+        };
+
+        assert_eq!(smtp_host_domain(&settings), "example.com");
+    }
+
+    #[test]
+    fn parse_smtp_path_handles_params_and_brackets() {
+        assert_eq!(
+            parse_smtp_path("<verify@example.com> SIZE=123").as_deref(),
+            Some("verify@example.com")
+        );
+        assert_eq!(parse_smtp_path("<>").as_deref(), Some(""));
+        assert_eq!(
+            parse_smtp_path("verify@example.com SIZE=123").as_deref(),
+            Some("verify@example.com")
+        );
+        assert_eq!(parse_smtp_path("<missing-end"), None);
+        assert_eq!(parse_smtp_path("   "), None);
+    }
+
+    #[test]
+    fn map_stream_parse_error_uses_smtp_parity_status_codes() {
+        let too_large =
+            parser::extract_header_from_and_nonce(b"From: a@example.com\r\n\r\nx", 1).unwrap_err();
+        let generic = io::Error::new(io::ErrorKind::InvalidData, "bad mime");
+
+        assert_eq!(
+            map_stream_parse_error(&too_large),
+            SmtpReply::new(552, "Message size exceeds limit", Some("5.3.4"))
+        );
+        assert_eq!(
+            map_stream_parse_error(&generic),
+            SmtpReply::new(550, "Invalid message", Some("5.6.0"))
+        );
+    }
+
+    #[test]
+    fn rcpt_policy_matches_go_behavior() {
+        assert!(is_rcpt_allowed("", "verify@example.com"));
+        assert!(is_rcpt_allowed("verify@example.com", "VERIFY@example.com"));
+        assert!(!is_rcpt_allowed("verify@example.com", "other@example.com"));
+    }
+
+    #[tokio::test]
+    async fn read_data_unstuffs_and_enforces_size() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            stream
+                .write_all(b"hello\r\n..dot-stuffed\r\n.\r\n")
+                .await
+                .unwrap();
+        });
+
+        let (server, _) = listener.accept().await.unwrap();
+        let data = read_data(&mut BufReader::new(server)).await.unwrap();
+        client.await.unwrap();
+
+        assert_eq!(
+            String::from_utf8(data).unwrap(),
+            "hello\r\n.dot-stuffed\r\n"
+        );
+        assert_eq!(APP_NAME, "MAPAE");
+    }
+
+    #[tokio::test]
+    async fn read_data_reports_unexpected_eof() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            stream.write_all(b"unterminated\r\n").await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+
+        let (server, _) = listener.accept().await.unwrap();
+        let err = read_data(&mut BufReader::new(server)).await.unwrap_err();
+        client.await.unwrap();
+
+        assert_eq!(err, SmtpReply::new(550, "Invalid message", Some("5.6.0")));
+    }
+
+    #[tokio::test]
+    async fn stream_extract_data_parses_dot_unstuffed_message() {
+        let nonce = "a".repeat(64);
+        let payload = format!(
+            "From: user@example.com\r\nContent-Type: text/plain\r\n\r\n..leading dot\r\n[MAPAE:{nonce}]\r\n.\r\n"
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            stream.write_all(payload.as_bytes()).await.unwrap();
+        });
+
+        let (server, _) = listener.accept().await.unwrap();
+        let got = stream_extract_data(&mut BufReader::new(server))
+            .await
+            .unwrap();
+        client.await.unwrap();
+
+        assert_eq!(got.header_from, "user@example.com");
+        assert_eq!(got.nonce, nonce);
+        assert!(got.bytes_read > 0);
+    }
+
+    #[tokio::test]
+    async fn stream_extract_data_rejects_oversize_after_nonce() {
+        let nonce = "b".repeat(64);
+        let mut payload = format!("From: user@example.com\r\n\r\n[MAPAE:{nonce}]\r\n");
+        for _ in 0..(DATA_SIZE_LIMIT_BYTES / 1024 + 2) {
+            payload.push_str(&"x".repeat(1024));
+            payload.push_str("\r\n");
+        }
+        payload.push_str(".\r\n");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            stream.write_all(payload.as_bytes()).await.unwrap();
+        });
+
+        let (server, _) = listener.accept().await.unwrap();
+        let err = stream_extract_data(&mut BufReader::new(server))
+            .await
+            .unwrap_err();
+        client.await.unwrap();
+
+        assert_eq!(
+            err,
+            SmtpReply::new(552, "Message size exceeds limit", Some("5.3.4"))
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_extract_data_drains_after_parser_failure() {
+        let mut payload = String::from("malformed-header\r\n");
+        for _ in 0..32 {
+            payload.push_str("body line after parser failure\r\n");
+        }
+        payload.push_str(".\r\nNOOP\r\n");
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = tokio::spawn(async move {
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            stream.write_all(payload.as_bytes()).await.unwrap();
+        });
+
+        let (server, _) = listener.accept().await.unwrap();
+        let mut reader = BufReader::new(server);
+        let err = stream_extract_data(&mut reader).await.unwrap_err();
+        let next = read_line_limited(&mut reader, SMTP_MAX_LINE_BYTES, SMTP_COMMAND_TIMEOUT)
+            .await
+            .unwrap()
+            .unwrap();
+        client.await.unwrap();
+
+        assert_eq!(err, SmtpReply::new(550, "Invalid message", Some("5.6.0")));
+        assert_eq!(parser::trim_crlf(&next), b"NOOP");
+    }
+}

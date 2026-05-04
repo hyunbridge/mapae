@@ -1,0 +1,49 @@
+[package]
+name = "mapae"
+version = "1.0.0"
+edition = "2021"
+rust-version = "1.95"
+description = "Mobile Authentication Platform via Automated Email"
+license = "MIT"
+keywords = ["authentication", "email", "smtp", "mobile"]
+categories = ["authentication"]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"
+overflow-checks = false
+debug = false
+
+[profile.dev]
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[dependencies]
+warp = { version = "0.4", features = ["server"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "signal", "sync", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+redis = { version = "1", features = ["tokio-comp", "connection-manager"] }
+ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+base64 = "0.22"
+getrandom = "0.2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+mailparse = "0.16"
+mail-auth = { version = "0.8", default-features = false, features = ["ring"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+jsonwebtoken = { version = "10", features = ["use_pem", "ed25519-dalek", "rust_crypto"] }
+hyper-util = { version = "0.1.20", features = ["server", "http1", "http2", "tokio", "service"] }
+tokio-io-timeout = "1.2"
+anyhow = "1"
+thiserror = "2"
+percent-encoding = "2"
+
+[dev-dependencies]
+pkcs8 = { version = "0.10", features = ["pem"] }
+rand = "0.8"
