@@ -882,8 +882,8 @@ fn normalize_email_address(value: &str) -> Option<String> {
     None
 }
 
-fn map_stream_parse_error(err: &io::Error) -> SmtpReply {
-    if parser::is_message_too_large(err) {
+fn map_stream_parse_error(err: &parser::ParseError) -> SmtpReply {
+    if err.is_message_too_large() {
         return SmtpReply::new(552, "Message size exceeds limit", Some("5.3.4"));
     }
 
@@ -949,7 +949,6 @@ mod tests {
         SMTP_MAX_LINE_BYTES,
     };
     use crate::config::Settings;
-    use std::io;
     use tokio::io::{AsyncWriteExt, BufReader};
     use tokio::net::TcpListener;
 
@@ -1016,7 +1015,7 @@ mod tests {
     fn map_stream_parse_error_uses_smtp_parity_status_codes() {
         let too_large =
             parser::extract_header_from_and_nonce(b"From: a@example.com\r\n\r\nx", 1).unwrap_err();
-        let generic = io::Error::new(io::ErrorKind::InvalidData, "bad mime");
+        let generic = parser::ParseError::InvalidMessage("bad mime".to_string());
 
         assert_eq!(
             map_stream_parse_error(&too_large),

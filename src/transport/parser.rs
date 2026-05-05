@@ -1,27 +1,51 @@
 use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read};
 
 use base64::{engine::general_purpose::STANDARD, read::DecoderReader};
+use thiserror::Error;
 
 const NONCE_HEX_LENGTH: usize = 64;
 const MAX_MIME_DEPTH: usize = 5;
 const READ_BUFFER_SIZE: usize = 4096;
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
+#[error("message too large")]
 struct MessageTooLarge;
 
-impl fmt::Display for MessageTooLarge {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("message too large")
+#[derive(Debug, Error)]
+pub enum ParseError {
+    #[error("message too large")]
+    MessageTooLarge,
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
+    #[error("invalid message: {0}")]
+    InvalidMessage(String),
+    #[error("I/O error: {0}")]
+    Io(#[from] io::Error),
+}
+
+impl ParseError {
+    fn from_io(err: io::Error) -> Self {
+        if is_message_too_large_io(&err) {
+            return Self::MessageTooLarge;
+        }
+
+        match err.kind() {
+            ErrorKind::InvalidInput => Self::InvalidInput(err.to_string()),
+            ErrorKind::InvalidData | ErrorKind::UnexpectedEof => {
+                Self::InvalidMessage(err.to_string())
+            }
+            _ => Self::Io(err),
+        }
+    }
+
+    /// 오류가 메시지 크기 제한 초과를 의미하는지 확인합니다.
+    pub fn is_message_too_large(&self) -> bool {
+        matches!(self, Self::MessageTooLarge)
     }
 }
 
-impl Error for MessageTooLarge {}
-
-/// I/O 오류가 메시지 크기 제한 초과를 의미하는지 확인합니다.
-pub fn is_message_too_large(err: &io::Error) -> bool {
+fn is_message_too_large_io(err: &io::Error) -> bool {
     err.kind() == ErrorKind::Other
         && err
             .get_ref()
@@ -341,7 +365,10 @@ pub struct ExtractResult {
 ///
 /// Base64, Quoted-Printable, Multipart 등 복잡한 MIME 구조를 재귀적으로 탐색하며,
 /// 자원 고갈(DoS) 방지를 위해 최대 깊이(`MAX_MIME_DEPTH`) 및 용량(`limit`)을 제한합니다.
-pub fn extract_header_from_and_nonce(data: &[u8], limit: usize) -> io::Result<ExtractResult> {
+pub fn extract_header_from_and_nonce(
+    data: &[u8],
+    limit: usize,
+) -> Result<ExtractResult, ParseError> {
     extract_header_from_and_nonce_stream(data, limit)
 }
 
@@ -352,11 +379,10 @@ pub fn extract_header_from_and_nonce(data: &[u8], limit: usize) -> io::Result<Ex
 pub fn extract_header_from_and_nonce_stream<R: Read>(
     reader: R,
     limit: usize,
-) -> io::Result<ExtractResult> {
+) -> Result<ExtractResult, ParseError> {
     if limit == 0 {
-        return Err(io::Error::new(
-            ErrorKind::InvalidInput,
-            "byte limit must be greater than zero",
+        return Err(ParseError::InvalidInput(
+            "byte limit must be greater than zero".to_string(),
         ));
     }
 
@@ -381,12 +407,12 @@ pub fn extract_header_from_and_nonce_stream<R: Read>(
     })();
 
     if let Err(err) = &result {
-        if !is_message_too_large(err) {
+        if !is_message_too_large_io(err) {
             let _ = drain_to_end(&mut reader);
         }
     }
 
-    result
+    result.map_err(ParseError::from_io)
 }
 
 fn read_mime_headers<R: BufRead + ?Sized>(reader: &mut R) -> io::Result<MimeHeaders> {
@@ -573,7 +599,7 @@ fn scan_multipart(
         let mut part_body = PartBody::new(reader, marker.clone());
         let scan_result = scan_entity(&mut part_body, &part_headers, scanner, depth + 1);
         if let Err(err) = scan_result {
-            if !is_message_too_large(&err) {
+            if !is_message_too_large_io(&err) {
                 let _ = drain_to_end(&mut part_body);
             }
             return Err(err);
@@ -673,7 +699,7 @@ fn scan_leaf_body<R: Read + ?Sized>(
 
             match result {
                 Ok(()) => drain_to_end(raw),
-                Err(err) if is_message_too_large(&err) => Err(err),
+                Err(err) if is_message_too_large_io(&err) => Err(err),
                 // 통신사 MMS에는 깨진 optional part가 섞일 수 있어, 크기 제한만 전파하고
                 // decode 실패는 Nonce 미발견으로 취급합니다.
                 Err(_) => drain_to_end(raw),
@@ -932,21 +958,21 @@ mod tests {
         );
 
         let err = extract_header_from_and_nonce_stream(raw.as_bytes(), raw.len() - 1).unwrap_err();
-        assert!(is_message_too_large(&err));
+        assert!(err.is_message_too_large());
     }
 
     #[test]
     fn test_extract_header_from_and_nonce_rejects_oversize_input() {
         let raw = b"From: user@example.com\r\n\r\nhello";
         let err = extract_header_from_and_nonce(raw, raw.len() - 1).unwrap_err();
-        assert!(is_message_too_large(&err));
+        assert!(err.is_message_too_large());
     }
 
     #[test]
     fn test_extract_header_from_and_nonce_rejects_zero_limit() {
         let raw = b"From: user@example.com\r\n\r\nhello";
         let err = extract_header_from_and_nonce(raw, 0).unwrap_err();
-        assert_eq!(err.kind(), ErrorKind::InvalidInput);
+        assert!(matches!(err, ParseError::InvalidInput(_)));
     }
 
     #[test]
