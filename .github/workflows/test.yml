@@ -8,10 +8,18 @@ on:
 
 env:
   RUST_VERSION: 1.95.0
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
 
     steps:
       - name: Checkout
@@ -19,18 +27,28 @@ jobs:
 
       - name: Setup Rust
         run: |
-          rustup toolchain install "$RUST_VERSION" --profile minimal
-          rustup component add rustfmt clippy --toolchain "$RUST_VERSION"
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt --component clippy
           rustup default "$RUST_VERSION"
+
+      - name: Cache Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ runner.arch }}-${{ env.RUST_VERSION }}-
 
       - name: Check formatting
         run: cargo fmt --check
 
       - name: Run clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Run tests
-        run: cargo test --locked --all-targets
+        run: cargo test --locked --all-targets --all-features
 
       - name: Build release
-        run: cargo build --release --locked
+        run: cargo build --release --locked --all-features
