@@ -20,11 +20,21 @@ pub struct AuthInitResponse {
     pub ttl_seconds: u64,
 }
 
+/// 인증 세션과 상태 조회 응답에서 사용하는 상태값.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AuthStatus {
+    Pending,
+    Waiting,
+    Verified,
+    Expired,
+}
+
 /// pending 인증 세션 저장 페이로드.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthPayload {
     /// 현재 세션 상태.
-    pub status: String,
+    pub status: AuthStatus,
     /// 세션 생성 시각(UTC).
     pub timestamp: String,
 }
@@ -33,7 +43,7 @@ pub struct AuthPayload {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VerifiedPayload {
     /// 현재 세션 상태.
-    pub status: String,
+    pub status: AuthStatus,
     /// 통신사 이메일 주소에서 얻은 정규화된 전화번호.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phone: Option<String>,
@@ -48,7 +58,7 @@ pub struct VerifiedPayload {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthCheckResponse {
     /// `waiting`, `verified`, or `expired`.
-    pub status: String,
+    pub status: AuthStatus,
     /// 성공 후에만 포함되는 검증된 전화번호.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub phone: Option<String>,
@@ -111,7 +121,7 @@ impl Service {
         let auth_id = random_hex(16)?;
 
         let payload = AuthPayload {
-            status: "pending".to_string(),
+            status: AuthStatus::Pending,
             timestamp: now_rfc3339(),
         };
         let payload_json = serde_json::to_string(&payload)?;
@@ -141,6 +151,13 @@ impl Service {
 
     /// JWT를 발급하지 않고 현재 인증 상태를 반환합니다.
     pub async fn check_auth(&self, auth_id: &str) -> Result<AuthCheckResponse, AuthError> {
+        self.load_auth_check_response(auth_id).await
+    }
+
+    async fn load_auth_check_response(
+        &self,
+        auth_id: &str,
+    ) -> Result<AuthCheckResponse, AuthError> {
         if !is_valid_auth_id(auth_id) {
             return Err(AuthError::InvalidAuthId);
         }
@@ -148,12 +165,12 @@ impl Service {
         let key = format!("auth:{auth_id}");
         let (value, ok) = self.store.get(&key).await?;
         if !ok {
-            return Ok(auth_check_response("expired"));
+            return Ok(auth_check_response(AuthStatus::Expired));
         }
 
         match serde_json::from_str::<AuthCheckResponse>(&value) {
-            Ok(decoded) if decoded.status == "verified" => Ok(decoded),
-            _ => Ok(auth_check_response("waiting")),
+            Ok(decoded) if decoded.status == AuthStatus::Verified => Ok(decoded),
+            _ => Ok(auth_check_response(AuthStatus::Waiting)),
         }
     }
 
@@ -178,7 +195,7 @@ impl Service {
         carrier: Option<&str>,
     ) -> Result<(), AuthError> {
         let payload = VerifiedPayload {
-            status: "verified".to_string(),
+            status: AuthStatus::Verified,
             phone: phone.map(std::string::ToString::to_string),
             carrier: carrier.map(std::string::ToString::to_string),
             timestamp: now_rfc3339(),
@@ -193,30 +210,16 @@ impl Service {
 
     /// 서명이 설정된 경우 검증된 인증 결과와 JWT를 함께 반환합니다.
     pub async fn check_signed(&self, auth_id: &str) -> Result<AuthCheckResponse, AuthError> {
-        if !is_valid_auth_id(auth_id) {
-            return Err(AuthError::InvalidAuthId);
-        }
-
-        let key = format!("auth:{auth_id}");
-        let (value, ok) = self.store.get(&key).await?;
-        if !ok {
-            return Ok(auth_check_response("expired"));
-        }
-
-        let decoded: AuthCheckResponse = match serde_json::from_str(&value) {
-            Ok(decoded) => decoded,
-            Err(_) => return Ok(auth_check_response("waiting")),
-        };
-
-        if decoded.status != "verified" {
-            return Ok(auth_check_response("waiting"));
+        let decoded = self.check_auth(auth_id).await?;
+        if decoded.status != AuthStatus::Verified {
+            return Ok(decoded);
         }
 
         let signer = self.signer.as_ref().ok_or(AuthError::JwksUnavailable)?;
 
         let phone = decoded.phone.as_deref().unwrap_or("");
         if phone.is_empty() {
-            return Ok(auth_check_response("waiting"));
+            return Ok(auth_check_response(AuthStatus::Waiting));
         }
 
         let token = signer.sign(
@@ -243,9 +246,9 @@ fn is_valid_auth_id(auth_id: &str) -> bool {
     auth_id.len() == 32 && auth_id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-fn auth_check_response(status: &'static str) -> AuthCheckResponse {
+fn auth_check_response(status: AuthStatus) -> AuthCheckResponse {
     AuthCheckResponse {
-        status: status.to_string(),
+        status,
         phone: None,
         carrier: None,
         timestamp: None,
@@ -324,7 +327,7 @@ mod tests {
         assert_eq!(init.ttl_seconds, 60);
 
         let check = svc.check_auth(&init.auth_id).await.unwrap();
-        assert_eq!(check.status, "waiting");
+        assert_eq!(check.status, AuthStatus::Waiting);
 
         let nonce = init
             .sms_body
@@ -345,7 +348,7 @@ mod tests {
             .unwrap();
 
         let check = svc.check_auth(&init.auth_id).await.unwrap();
-        assert_eq!(check.status, "verified");
+        assert_eq!(check.status, AuthStatus::Verified);
         assert_eq!(check.phone.as_deref(), Some("01012345678"));
         assert_eq!(check.carrier.as_deref(), Some("KT"));
     }
@@ -362,7 +365,17 @@ mod tests {
         let svc = Service::new(crate::storage::StoreBackend::Memory(store), &settings).unwrap();
 
         let check = svc.check_signed(&auth_id).await.unwrap();
-        assert_eq!(check.status, "waiting");
+        assert_eq!(check.status, AuthStatus::Waiting);
+    }
+
+    #[test]
+    fn test_auth_status_serializes_as_lowercase_string() {
+        let response = auth_check_response(AuthStatus::Verified);
+
+        assert_eq!(
+            serde_json::to_value(response).unwrap()["status"],
+            serde_json::json!("verified")
+        );
     }
 
     #[tokio::test]
@@ -417,6 +430,10 @@ mod tests {
         assert!(result.is_err(), "store_verified should fail with ttl=0");
 
         let check = svc.check_auth(&auth_id).await.unwrap();
-        assert_eq!(check.status, "waiting", "auth should not be verified");
+        assert_eq!(
+            check.status,
+            AuthStatus::Waiting,
+            "auth should not be verified"
+        );
     }
 }
