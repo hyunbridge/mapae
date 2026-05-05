@@ -254,14 +254,30 @@ async fn handle_session(
         let command = String::from_utf8_lossy(parser::trim_crlf(&line));
         let upper = command.to_ascii_uppercase();
         if upper.starts_with("EHLO ") || upper == "EHLO" {
-            session.helo_domain = command[4..].trim().to_string();
+            let Some(domain) = parse_helo_domain(&command) else {
+                write_reply(
+                    &mut reader,
+                    SmtpReply::new(501, "Missing domain", Some("5.5.2")),
+                )
+                .await?;
+                continue;
+            };
+            session.helo_domain = domain.to_string();
             write_line(
                 &mut reader,
                 &format!("250-{APP_NAME}\r\n250 SIZE {DATA_SIZE_LIMIT_BYTES}\r\n"),
             )
             .await?;
         } else if upper.starts_with("HELO ") || upper == "HELO" {
-            session.helo_domain = command[4..].trim().to_string();
+            let Some(domain) = parse_helo_domain(&command) else {
+                write_reply(
+                    &mut reader,
+                    SmtpReply::new(501, "Missing domain", Some("5.5.2")),
+                )
+                .await?;
+                continue;
+            };
+            session.helo_domain = domain.to_string();
             write_line(&mut reader, &format!("250 {APP_NAME}\r\n")).await?;
         } else if upper.starts_with("MAIL FROM:") {
             let Some(from) = parse_smtp_path(&command[10..]) else {
@@ -550,7 +566,7 @@ async fn read_line_limited(
 ) -> io::Result<Option<Vec<u8>>> {
     let mut line = Vec::new();
     let fut = async {
-        let mut taker = (reader as &mut BufReader<TcpStream>).take((limit + 1) as u64);
+        let mut taker = (reader as &mut BufReader<TcpStream>).take(limit.saturating_add(1) as u64);
         taker.read_until(b'\n', &mut line).await
     };
 
@@ -586,6 +602,15 @@ fn parse_smtp_path(value: &str) -> Option<String> {
         .next()
         .map(|addr| addr.trim().to_string())
         .filter(|addr| !addr.is_empty())
+}
+
+fn parse_helo_domain(command: &str) -> Option<&str> {
+    let domain = command.get(4..)?.trim();
+    if domain.is_empty() {
+        None
+    } else {
+        Some(domain)
+    }
 }
 
 fn handle_rcpt(config: &Settings, session: &SmtpSession, to: &str) -> Result<(), SmtpReply> {
@@ -779,7 +804,7 @@ fn normalize_email_address(value: &str) -> Option<String> {
         }
     }
 
-    Some(trimmed.to_string())
+    None
 }
 
 fn map_stream_parse_error(err: &io::Error) -> SmtpReply {
@@ -843,9 +868,10 @@ fn smtp_host_domain(config: &Settings) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_rcpt_allowed, map_stream_parse_error, normalize_email_address, parse_smtp_path, parser,
-        read_data, read_line_limited, smtp_host_domain, stream_extract_data, SmtpReply, APP_NAME,
-        DATA_SIZE_LIMIT_BYTES, SMTP_COMMAND_TIMEOUT, SMTP_MAX_LINE_BYTES,
+        is_rcpt_allowed, map_stream_parse_error, normalize_email_address, parse_helo_domain,
+        parse_smtp_path, parser, read_data, read_line_limited, smtp_host_domain,
+        stream_extract_data, SmtpReply, APP_NAME, DATA_SIZE_LIMIT_BYTES, SMTP_COMMAND_TIMEOUT,
+        SMTP_MAX_LINE_BYTES,
     };
     use crate::config::Settings;
     use std::io;
@@ -875,11 +901,8 @@ mod tests {
     }
 
     #[test]
-    fn normalize_email_address_falls_back_to_trimmed_value() {
-        assert_eq!(
-            normalize_email_address("not-an-rfc5322 address").as_deref(),
-            Some("not-an-rfc5322 address")
-        );
+    fn normalize_email_address_rejects_malformed_sender() {
+        assert_eq!(normalize_email_address("not-an-rfc5322 address"), None);
     }
 
     #[test]
@@ -905,6 +928,13 @@ mod tests {
         );
         assert_eq!(parse_smtp_path("<missing-end"), None);
         assert_eq!(parse_smtp_path("   "), None);
+    }
+
+    #[test]
+    fn parse_helo_domain_rejects_empty_domain() {
+        assert_eq!(parse_helo_domain("EHLO"), None);
+        assert_eq!(parse_helo_domain("EHLO   "), None);
+        assert_eq!(parse_helo_domain("HELO example.com"), Some("example.com"));
     }
 
     #[test]

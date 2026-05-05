@@ -53,19 +53,23 @@ impl<R: Read> Read for CountingLimitReader<R> {
         if buf.is_empty() {
             return Ok(0);
         }
+        if self.limit == 0 {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "byte limit must be greater than zero",
+            ));
+        }
 
         let mut max_len = buf.len();
-        if self.limit > 0 {
-            let remaining = (self.limit + 1).saturating_sub(self.bytes_read);
-            if remaining == 0 {
-                return Err(io::Error::other(MessageTooLarge));
-            }
-            max_len = max_len.min(remaining);
+        let remaining = self.limit.saturating_add(1).saturating_sub(self.bytes_read);
+        if remaining == 0 {
+            return Err(io::Error::other(MessageTooLarge));
         }
+        max_len = max_len.min(remaining);
 
         let n = self.inner.read(&mut buf[..max_len])?;
         self.bytes_read += n;
-        if self.limit > 0 && self.bytes_read > self.limit {
+        if self.bytes_read > self.limit {
             return Err(io::Error::other(MessageTooLarge));
         }
 
@@ -349,6 +353,13 @@ pub fn extract_header_from_and_nonce_stream<R: Read>(
     reader: R,
     limit: usize,
 ) -> io::Result<ExtractResult> {
+    if limit == 0 {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            "byte limit must be greater than zero",
+        ));
+    }
+
     let mut reader = BufReader::new(CountingLimitReader::new(reader, limit));
 
     let result = (|| {
@@ -989,6 +1000,13 @@ mod tests {
         let raw = b"From: user@example.com\r\n\r\nhello";
         let err = extract_header_from_and_nonce(raw, raw.len() - 1).unwrap_err();
         assert!(is_message_too_large(&err));
+    }
+
+    #[test]
+    fn test_extract_header_from_and_nonce_rejects_zero_limit() {
+        let raw = b"From: user@example.com\r\n\r\nhello";
+        let err = extract_header_from_and_nonce(raw, 0).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput);
     }
 
     #[test]
