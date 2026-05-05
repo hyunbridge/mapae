@@ -8,9 +8,10 @@ use mail_auth::{spf::verify::SpfParameters, MessageAuthenticator, SpfResult};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::timeout;
+use tokio_util::io::SyncIoBridge;
 use tracing::{error, info, warn};
 
 use super::{parser, DATA_SIZE_LIMIT_BYTES};
@@ -178,54 +179,6 @@ impl SmtpReply {
 enum SessionAction {
     Continue,
     Close,
-}
-
-struct ChannelDataReader {
-    rx: mpsc::Receiver<io::Result<Vec<u8>>>,
-    pending: Vec<u8>,
-    offset: usize,
-}
-
-impl ChannelDataReader {
-    fn new(rx: mpsc::Receiver<io::Result<Vec<u8>>>) -> Self {
-        Self {
-            rx,
-            pending: Vec::new(),
-            offset: 0,
-        }
-    }
-}
-
-impl io::Read for ChannelDataReader {
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        if out.is_empty() {
-            return Ok(0);
-        }
-
-        loop {
-            if self.offset < self.pending.len() {
-                let available = self.pending.len() - self.offset;
-                let to_copy = available.min(out.len());
-                out[..to_copy].copy_from_slice(&self.pending[self.offset..self.offset + to_copy]);
-                self.offset += to_copy;
-                if self.offset == self.pending.len() {
-                    self.pending.clear();
-                    self.offset = 0;
-                }
-                return Ok(to_copy);
-            }
-
-            match self.rx.blocking_recv() {
-                Some(Ok(chunk)) if chunk.is_empty() => continue,
-                Some(Ok(chunk)) => {
-                    self.pending = chunk;
-                    self.offset = 0;
-                }
-                Some(Err(err)) => return Err(err),
-                None => return Ok(0),
-            }
-        }
-    }
 }
 
 async fn handle_session(
@@ -511,15 +464,15 @@ async fn read_data(reader: &mut BufReader<TcpStream>) -> Result<Vec<u8>, SmtpRep
 async fn stream_extract_data(
     reader: &mut BufReader<TcpStream>,
 ) -> Result<parser::ExtractResult, SmtpReply> {
-    let (tx, rx) = mpsc::channel::<io::Result<Vec<u8>>>(8);
+    let (mut body_writer, body_reader) = tokio::io::duplex(64 * 1024);
+    let runtime = tokio::runtime::Handle::current();
     let parser_task = tokio::task::spawn_blocking(move || {
         parser::extract_header_from_and_nonce_stream(
-            ChannelDataReader::new(rx),
+            SyncIoBridge::new_with_handle(body_reader, runtime),
             DATA_SIZE_LIMIT_BYTES,
         )
     });
 
-    let mut tx = Some(tx);
     let mut read_error = None;
     let mut parser_finished_before_terminator = false;
 
@@ -557,17 +510,13 @@ async fn stream_extract_data(
             line.as_slice()
         };
 
-        let Some(sender) = tx.as_ref() else {
-            parser_finished_before_terminator = true;
-            break;
-        };
-        if sender.send(Ok(body_line.to_vec())).await.is_err() {
+        if body_writer.write_all(body_line).await.is_err() {
             parser_finished_before_terminator = true;
             break;
         }
     }
 
-    drop(tx.take());
+    drop(body_writer);
 
     if let Some(reply) = read_error {
         let _ = parser_task.await;
