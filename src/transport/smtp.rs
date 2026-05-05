@@ -174,6 +174,12 @@ impl SmtpReply {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum SessionAction {
+    Continue,
+    Close,
+}
+
 struct ChannelDataReader {
     rx: mpsc::Receiver<io::Result<Vec<u8>>>,
     pending: Vec<u8>,
@@ -252,136 +258,196 @@ async fn handle_session(
             };
 
         let command = String::from_utf8_lossy(parser::trim_crlf(&line));
-        let upper = command.to_ascii_uppercase();
-        if upper.starts_with("EHLO ") || upper == "EHLO" {
-            let Some(domain) = parse_helo_domain(&command) else {
-                write_reply(
-                    &mut reader,
-                    SmtpReply::new(501, "Missing domain", Some("5.5.2")),
-                )
-                .await?;
-                continue;
-            };
-            session.helo_domain = domain.to_string();
-            write_line(
-                &mut reader,
-                &format!("250-{APP_NAME}\r\n250 SIZE {DATA_SIZE_LIMIT_BYTES}\r\n"),
-            )
-            .await?;
-        } else if upper.starts_with("HELO ") || upper == "HELO" {
-            let Some(domain) = parse_helo_domain(&command) else {
-                write_reply(
-                    &mut reader,
-                    SmtpReply::new(501, "Missing domain", Some("5.5.2")),
-                )
-                .await?;
-                continue;
-            };
-            session.helo_domain = domain.to_string();
-            write_line(&mut reader, &format!("250 {APP_NAME}\r\n")).await?;
-        } else if upper.starts_with("MAIL FROM:") {
-            let Some(from) = parse_smtp_path(&command[10..]) else {
-                write_reply(
-                    &mut reader,
-                    SmtpReply::new(501, "Invalid sender", Some("5.1.7")),
-                )
-                .await?;
-                continue;
-            };
-            session.mail_from = from;
-            session.mail_seen = true;
-            session.rcpt_count = 0;
-            write_reply(&mut reader, SmtpReply::new(250, "OK", None)).await?;
-        } else if upper.starts_with("RCPT TO:") {
-            if !session.mail_seen {
-                write_reply(
-                    &mut reader,
-                    SmtpReply::new(503, "Need MAIL FROM first", Some("5.5.1")),
-                )
-                .await?;
-                continue;
-            }
-
-            let Some(to) = parse_smtp_path(&command[8..]) else {
-                write_reply(
-                    &mut reader,
-                    SmtpReply::new(501, "Invalid recipient", Some("5.1.3")),
-                )
-                .await?;
-                continue;
-            };
-            match handle_rcpt(&config, &session, &to) {
-                Ok(()) => {
-                    session.rcpt_count += 1;
-                    write_reply(&mut reader, SmtpReply::new(250, "OK", None)).await?;
-                }
-                Err(reply) => write_reply(&mut reader, reply).await?,
-            }
-        } else if upper == "DATA" {
-            if !session.mail_seen || session.rcpt_count == 0 {
-                write_reply(
-                    &mut reader,
-                    SmtpReply::new(503, "Need MAIL FROM and RCPT TO first", Some("5.5.1")),
-                )
-                .await?;
-                continue;
-            }
-
-            write_reply(
-                &mut reader,
-                SmtpReply::new(354, "End data with <CR><LF>.<CR><LF>", None),
-            )
-            .await?;
-            let result = if config.dump_inbound {
-                match read_data(&mut reader).await {
-                    Ok(data) => {
-                        process_email_data(&config, &auth_service, &authenticator, &session, data)
-                            .await
-                    }
-                    Err(reply) => Err(reply),
-                }
-            } else {
-                match stream_extract_data(&mut reader).await {
-                    Ok(extract_result) => {
-                        process_extracted_email(
-                            &config,
-                            &auth_service,
-                            &authenticator,
-                            &session,
-                            extract_result,
-                            None,
-                        )
-                        .await
-                    }
-                    Err(reply) => Err(reply),
-                }
-            };
-
-            match result {
-                Ok(()) => write_reply(&mut reader, SmtpReply::new(250, "OK", None)).await?,
-                Err(reply) => {
-                    let close_after_reply = reply.status == 552;
-                    write_reply(&mut reader, reply).await?;
-                    if close_after_reply {
-                        return Ok(());
-                    }
-                }
-            }
-            session.reset_transaction();
-        } else if upper == "RSET" {
-            session.reset_transaction();
-            write_reply(&mut reader, SmtpReply::new(250, "OK", None)).await?;
-        } else if upper == "NOOP" {
-            write_reply(&mut reader, SmtpReply::new(250, "OK", None)).await?;
-        } else if upper == "QUIT" {
-            write_reply(&mut reader, SmtpReply::new(221, "Bye", None)).await?;
+        let action = handle_smtp_command(
+            &mut reader,
+            &command,
+            &mut session,
+            &config,
+            &auth_service,
+            &authenticator,
+        )
+        .await?;
+        if action == SessionAction::Close {
             return Ok(());
-        } else {
-            write_reply(
-                &mut reader,
-                SmtpReply::new(502, "Command not implemented", Some("5.5.1")),
-            )
-            .await?;
+        }
+    }
+}
+
+async fn handle_smtp_command(
+    reader: &mut BufReader<TcpStream>,
+    command: &str,
+    session: &mut SmtpSession,
+    config: &Settings,
+    auth_service: &Service,
+    authenticator: &MessageAuthenticator,
+) -> io::Result<SessionAction> {
+    let upper = command.to_ascii_uppercase();
+    if upper.starts_with("EHLO ") || upper == "EHLO" {
+        handle_helo_command(reader, session, command, true).await?;
+    } else if upper.starts_with("HELO ") || upper == "HELO" {
+        handle_helo_command(reader, session, command, false).await?;
+    } else if upper.starts_with("MAIL FROM:") {
+        handle_mail_command(reader, session, command).await?;
+    } else if upper.starts_with("RCPT TO:") {
+        handle_rcpt_command(reader, config, session, command).await?;
+    } else if upper == "DATA" {
+        return handle_data_command(reader, config, auth_service, authenticator, session).await;
+    } else if upper == "RSET" {
+        session.reset_transaction();
+        write_reply(reader, SmtpReply::new(250, "OK", None)).await?;
+    } else if upper == "NOOP" {
+        write_reply(reader, SmtpReply::new(250, "OK", None)).await?;
+    } else if upper == "QUIT" {
+        write_reply(reader, SmtpReply::new(221, "Bye", None)).await?;
+        return Ok(SessionAction::Close);
+    } else {
+        write_reply(
+            reader,
+            SmtpReply::new(502, "Command not implemented", Some("5.5.1")),
+        )
+        .await?;
+    }
+
+    Ok(SessionAction::Continue)
+}
+
+async fn handle_helo_command(
+    reader: &mut BufReader<TcpStream>,
+    session: &mut SmtpSession,
+    command: &str,
+    extended: bool,
+) -> io::Result<()> {
+    let Some(domain) = parse_helo_domain(command) else {
+        write_reply(reader, SmtpReply::new(501, "Missing domain", Some("5.5.2"))).await?;
+        return Ok(());
+    };
+
+    session.helo_domain = domain.to_string();
+    if extended {
+        write_line(
+            reader,
+            &format!("250-{APP_NAME}\r\n250 SIZE {DATA_SIZE_LIMIT_BYTES}\r\n"),
+        )
+        .await
+    } else {
+        write_line(reader, &format!("250 {APP_NAME}\r\n")).await
+    }
+}
+
+async fn handle_mail_command(
+    reader: &mut BufReader<TcpStream>,
+    session: &mut SmtpSession,
+    command: &str,
+) -> io::Result<()> {
+    let Some(from) = parse_smtp_path(&command[10..]) else {
+        write_reply(reader, SmtpReply::new(501, "Invalid sender", Some("5.1.7"))).await?;
+        return Ok(());
+    };
+
+    session.mail_from = from;
+    session.mail_seen = true;
+    session.rcpt_count = 0;
+    write_reply(reader, SmtpReply::new(250, "OK", None)).await
+}
+
+async fn handle_rcpt_command(
+    reader: &mut BufReader<TcpStream>,
+    config: &Settings,
+    session: &mut SmtpSession,
+    command: &str,
+) -> io::Result<()> {
+    if !session.mail_seen {
+        write_reply(
+            reader,
+            SmtpReply::new(503, "Need MAIL FROM first", Some("5.5.1")),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let Some(to) = parse_smtp_path(&command[8..]) else {
+        write_reply(
+            reader,
+            SmtpReply::new(501, "Invalid recipient", Some("5.1.3")),
+        )
+        .await?;
+        return Ok(());
+    };
+
+    match handle_rcpt(config, session, &to) {
+        Ok(()) => {
+            session.rcpt_count += 1;
+            write_reply(reader, SmtpReply::new(250, "OK", None)).await
+        }
+        Err(reply) => write_reply(reader, reply).await,
+    }
+}
+
+async fn handle_data_command(
+    reader: &mut BufReader<TcpStream>,
+    config: &Settings,
+    auth_service: &Service,
+    authenticator: &MessageAuthenticator,
+    session: &mut SmtpSession,
+) -> io::Result<SessionAction> {
+    if !session.mail_seen || session.rcpt_count == 0 {
+        write_reply(
+            reader,
+            SmtpReply::new(503, "Need MAIL FROM and RCPT TO first", Some("5.5.1")),
+        )
+        .await?;
+        return Ok(SessionAction::Continue);
+    }
+
+    write_reply(
+        reader,
+        SmtpReply::new(354, "End data with <CR><LF>.<CR><LF>", None),
+    )
+    .await?;
+
+    match receive_and_process_data(reader, config, auth_service, authenticator, session).await {
+        Ok(()) => write_reply(reader, SmtpReply::new(250, "OK", None)).await?,
+        Err(reply) => {
+            let close_after_reply = reply.status == 552;
+            write_reply(reader, reply).await?;
+            if close_after_reply {
+                return Ok(SessionAction::Close);
+            }
+        }
+    }
+
+    session.reset_transaction();
+    Ok(SessionAction::Continue)
+}
+
+async fn receive_and_process_data(
+    reader: &mut BufReader<TcpStream>,
+    config: &Settings,
+    auth_service: &Service,
+    authenticator: &MessageAuthenticator,
+    session: &SmtpSession,
+) -> Result<(), SmtpReply> {
+    if config.dump_inbound {
+        match read_data(reader).await {
+            Ok(data) => {
+                process_email_data(config, auth_service, authenticator, session, data).await
+            }
+            Err(reply) => Err(reply),
+        }
+    } else {
+        match stream_extract_data(reader).await {
+            Ok(extract_result) => {
+                process_extracted_email(
+                    config,
+                    auth_service,
+                    authenticator,
+                    session,
+                    extract_result,
+                    None,
+                )
+                .await
+            }
+            Err(reply) => Err(reply),
         }
     }
 }
