@@ -3,108 +3,72 @@ use std::str::FromStr;
 use serde::Deserialize;
 
 /// 환경변수에서 읽어오는 런타임 설정.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     /// `RUST_LOG`가 없을 때 debug 레벨 로그를 활성화합니다.
+    #[serde(deserialize_with = "deserialize_bool_or_default")]
     pub debug: bool,
     /// Redis 대신 프로세스 로컬 메모리 저장소를 사용합니다.
+    #[serde(deserialize_with = "deserialize_bool_or_default")]
     pub use_in_memory_store: bool,
     /// 메모리 저장소를 쓰지 않을 때 사용할 Redis 연결 URL.
     pub redis_url: String,
     /// SMTP 리스너 호스트.
     pub smtp_host: String,
     /// SMTP 리스너 포트.
+    #[serde(deserialize_with = "deserialize_smtp_port")]
     pub smtp_port: u16,
     /// 동시에 처리할 최대 SMTP 세션 수.
+    #[serde(deserialize_with = "deserialize_smtp_max_connections")]
     pub smtp_max_connections: usize,
     /// 통신사 MMS 이메일을 수신할 주소.
     pub sms_inbound_address: String,
     /// 디버깅용 inbound 메시지 일부를 로그로 남깁니다.
+    #[serde(deserialize_with = "deserialize_bool_or_default")]
     pub dump_inbound: bool,
     /// HTTP 리스너 호스트.
     pub http_host: String,
     /// HTTP 리스너 포트.
+    #[serde(deserialize_with = "deserialize_http_port")]
     pub http_port: u16,
     /// 동시에 처리할 최대 HTTP 연결 수.
+    #[serde(deserialize_with = "deserialize_http_max_connections")]
     pub http_max_connections: usize,
     /// 허용할 CORS origin 목록. `*`는 모든 origin을 허용합니다.
+    #[serde(deserialize_with = "deserialize_cors_allow_origins")]
     pub cors_allow_origins: Vec<String>,
     /// pending 인증 세션 TTL.
+    #[serde(deserialize_with = "deserialize_auth_ttl_seconds")]
     pub auth_ttl_seconds: u64,
     /// verified 인증 결과 TTL.
+    #[serde(deserialize_with = "deserialize_verified_ttl_seconds")]
     pub verified_ttl_seconds: u64,
     /// JWT 서명에 사용할 Ed25519 PKCS#8 private key PEM.
+    #[serde(rename = "jwt_private_key")]
     pub jwt_private_key_pem: String,
     /// JWT issuer claim.
     pub jwt_issuer: String,
     /// JWT 유효 기간.
+    #[serde(deserialize_with = "deserialize_jwt_ttl_seconds")]
     pub jwt_ttl_seconds: u64,
 }
 
 impl Settings {
     /// 환경변수를 읽고 비어 있는 값은 기본값으로 채웁니다.
     pub fn load() -> Self {
-        Self::from_env_settings(EnvSettings::load())
+        envy::from_env::<Self>()
+            .unwrap_or_else(|err| {
+                eprintln!("warning: ignoring invalid environment configuration: {err}");
+                Self::default()
+            })
+            .normalized()
     }
 
-    fn from_env_settings(env: EnvSettings) -> Self {
-        let mut settings = Self::default();
-
-        if let Some(value) = env.debug {
-            settings.debug = value;
-        }
-        if let Some(value) = env.use_in_memory_store {
-            settings.use_in_memory_store = value;
-        }
-        if let Some(value) = env.redis_url {
-            settings.redis_url = value;
-        }
-        if let Some(value) = env.smtp_host {
-            settings.smtp_host = value;
-        }
-        if let Some(value) = env.smtp_port {
-            settings.smtp_port = value;
-        }
-        if let Some(value) = env.smtp_max_connections {
-            settings.smtp_max_connections = value;
-        }
-        if let Some(value) = env.sms_inbound_address {
-            settings.sms_inbound_address = value;
-        }
-        if let Some(value) = env.dump_inbound {
-            settings.dump_inbound = value;
-        }
-        if let Some(value) = env.http_host {
-            settings.http_host = value;
-        }
-        if let Some(value) = env.http_port {
-            settings.http_port = value;
-        }
-        if let Some(value) = env.http_max_connections {
-            settings.http_max_connections = value;
-        }
-        if let Some(value) = env.cors_allow_origins {
-            settings.cors_allow_origins = value;
-        }
-        if let Some(value) = env.auth_ttl_seconds {
-            settings.auth_ttl_seconds = value;
-        }
-        if let Some(value) = env.verified_ttl_seconds {
-            settings.verified_ttl_seconds = value;
-        }
-        if let Some(value) = env.jwt_private_key_pem {
-            settings.jwt_private_key_pem = value;
-        }
-        if let Some(value) = env.jwt_issuer {
-            settings.jwt_issuer = value;
-        }
-        if let Some(value) = env.jwt_ttl_seconds {
-            settings.jwt_ttl_seconds = value;
-        }
-
-        settings.smtp_max_connections = settings.smtp_max_connections.max(1);
-        settings.http_max_connections = settings.http_max_connections.max(1);
-        settings
+    fn normalized(mut self) -> Self {
+        self.smtp_max_connections = self.smtp_max_connections.max(1);
+        self.http_max_connections = self.http_max_connections.max(1);
+        self
     }
 }
 
@@ -132,110 +96,101 @@ impl Default for Settings {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct EnvSettings {
-    #[serde(default, deserialize_with = "deserialize_optional_bool")]
-    debug: Option<bool>,
-    #[serde(default, deserialize_with = "deserialize_optional_bool")]
-    use_in_memory_store: Option<bool>,
-    redis_url: Option<String>,
-    smtp_host: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_u16")]
-    smtp_port: Option<u16>,
-    #[serde(default, deserialize_with = "deserialize_optional_usize")]
-    smtp_max_connections: Option<usize>,
-    sms_inbound_address: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_bool")]
-    dump_inbound: Option<bool>,
-    http_host: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_u16")]
-    http_port: Option<u16>,
-    #[serde(default, deserialize_with = "deserialize_optional_usize")]
-    http_max_connections: Option<usize>,
-    #[serde(default, deserialize_with = "deserialize_optional_list")]
-    cors_allow_origins: Option<Vec<String>>,
-    #[serde(default, deserialize_with = "deserialize_optional_u64")]
-    auth_ttl_seconds: Option<u64>,
-    #[serde(default, deserialize_with = "deserialize_optional_u64")]
-    verified_ttl_seconds: Option<u64>,
-    #[serde(rename = "jwt_private_key")]
-    jwt_private_key_pem: Option<String>,
-    jwt_issuer: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_u64")]
-    jwt_ttl_seconds: Option<u64>,
-}
-
-impl EnvSettings {
-    fn load() -> Self {
-        envy::from_env().unwrap_or_else(|err| {
-            eprintln!("warning: ignoring invalid environment configuration: {err}");
-            Self::default()
-        })
-    }
-}
-
-fn deserialize_optional_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+fn deserialize_bool_or_default<'de, D>(deserializer: D) -> Result<bool, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let Some(value) = Option::<String>::deserialize(deserializer)? else {
-        return Ok(None);
+        return Ok(false);
     };
 
     Ok(match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Some(true),
-        "0" | "false" | "no" | "off" => Some(false),
-        _ => None,
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        _ => false,
     })
 }
 
-fn deserialize_optional_u16<'de, D>(deserializer: D) -> Result<Option<u16>, D::Error>
+fn deserialize_smtp_port<'de, D>(deserializer: D) -> Result<u16, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_optional_from_str(deserializer)
+    deserialize_from_str_or_default(deserializer, || Settings::default().smtp_port)
 }
 
-fn deserialize_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+fn deserialize_smtp_max_connections<'de, D>(deserializer: D) -> Result<usize, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_optional_from_str(deserializer)
+    deserialize_from_str_or_default(deserializer, || Settings::default().smtp_max_connections)
 }
 
-fn deserialize_optional_usize<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+fn deserialize_http_port<'de, D>(deserializer: D) -> Result<u16, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_optional_from_str(deserializer)
+    deserialize_from_str_or_default(deserializer, || Settings::default().http_port)
 }
 
-fn deserialize_optional_from_str<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+fn deserialize_http_max_connections<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_from_str_or_default(deserializer, || Settings::default().http_max_connections)
+}
+
+fn deserialize_auth_ttl_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_from_str_or_default(deserializer, || Settings::default().auth_ttl_seconds)
+}
+
+fn deserialize_verified_ttl_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_from_str_or_default(deserializer, || Settings::default().verified_ttl_seconds)
+}
+
+fn deserialize_jwt_ttl_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_from_str_or_default(deserializer, || Settings::default().jwt_ttl_seconds)
+}
+
+fn deserialize_from_str_or_default<'de, D, T>(
+    deserializer: D,
+    default: impl FnOnce() -> T,
+) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: FromStr,
 {
     Ok(Option::<String>::deserialize(deserializer)?
-        .and_then(|value| value.trim().parse::<T>().ok()))
+        .and_then(|value| value.trim().parse::<T>().ok())
+        .unwrap_or_else(default))
 }
 
-fn deserialize_optional_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+fn deserialize_cors_allow_origins<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
     let Some(value) = Option::<String>::deserialize(deserializer)? else {
-        return Ok(None);
+        return Ok(Settings::default().cors_allow_origins);
     };
 
     let trimmed = value.trim();
     if trimmed.is_empty() {
-        return Ok(None);
+        return Ok(Settings::default().cors_allow_origins);
     }
 
     if trimmed.starts_with('[') {
         return Ok(serde_json::from_str::<Vec<String>>(trimmed)
             .ok()
-            .filter(|parsed| !parsed.is_empty()));
+            .filter(|parsed| !parsed.is_empty())
+            .unwrap_or_else(|| Settings::default().cors_allow_origins));
     }
 
     let out: Vec<String> = trimmed
@@ -244,9 +199,9 @@ where
         .filter(|s| !s.is_empty())
         .collect();
     if out.is_empty() {
-        Ok(None)
+        Ok(Settings::default().cors_allow_origins)
     } else {
-        Ok(Some(out))
+        Ok(out)
     }
 }
 
@@ -256,13 +211,13 @@ mod tests {
     use std::env;
 
     fn settings_from_env(values: &[(&str, &str)]) -> Settings {
-        let env = envy::from_iter::<_, EnvSettings>(
+        envy::from_iter::<_, Settings>(
             values
                 .iter()
                 .map(|(key, value)| (key.to_string(), value.to_string())),
         )
-        .unwrap();
-        Settings::from_env_settings(env)
+        .unwrap()
+        .normalized()
     }
 
     #[test]
