@@ -1,6 +1,5 @@
 use crate::config::Settings;
 use crate::storage::{StorageError, Store, StoreBackend};
-use anyhow::Context;
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -82,8 +81,10 @@ pub enum AuthError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     Jwt(#[from] JwtError),
-    #[error(transparent)]
-    Internal(#[from] anyhow::Error),
+    #[error("invalid random byte length")]
+    InvalidRandomLength,
+    #[error("random byte generation failed: {0}")]
+    Random(#[from] getrandom::Error),
     #[error(transparent)]
     Serde(#[from] serde_json::Error),
 }
@@ -252,12 +253,12 @@ fn auth_check_response(status: &'static str) -> AuthCheckResponse {
     }
 }
 
-fn random_hex(bytes_len: usize) -> anyhow::Result<String> {
+fn random_hex(bytes_len: usize) -> Result<String, AuthError> {
     if bytes_len == 0 {
-        return Err(anyhow::anyhow!("invalid length"));
+        return Err(AuthError::InvalidRandomLength);
     }
     let mut buf = vec![0u8; bytes_len];
-    getrandom::getrandom(&mut buf).context("generate random bytes")?;
+    getrandom::getrandom(&mut buf)?;
     Ok(encode_hex(&buf))
 }
 
