@@ -704,13 +704,7 @@ async fn process_email_data(
     session: &SmtpSession,
     data: Vec<u8>,
 ) -> Result<(), SmtpReply> {
-    let extract_result =
-        parser::extract_header_from_and_nonce(data.as_slice(), DATA_SIZE_LIMIT_BYTES).map_err(
-            |e| {
-                error!("MIME parse error: {}", e);
-                map_stream_parse_error(&e)
-            },
-        )?;
+    let (data, extract_result) = extract_email_data(data).await?;
 
     process_extracted_email(
         config,
@@ -721,6 +715,22 @@ async fn process_email_data(
         Some(data.as_slice()),
     )
     .await
+}
+
+async fn extract_email_data(data: Vec<u8>) -> Result<(Vec<u8>, parser::ExtractResult), SmtpReply> {
+    tokio::task::spawn_blocking(move || {
+        parser::extract_header_from_and_nonce(data.as_slice(), DATA_SIZE_LIMIT_BYTES)
+            .map(|extract_result| (data, extract_result))
+    })
+    .await
+    .map_err(|err| {
+        error!("MIME parser task failed: {}", err);
+        SmtpReply::new(451, "Temporary server error", Some("4.3.0"))
+    })?
+    .map_err(|err| {
+        error!("MIME parse error: {}", err);
+        map_stream_parse_error(&err)
+    })
 }
 
 async fn process_extracted_email(
