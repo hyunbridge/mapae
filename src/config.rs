@@ -1,4 +1,6 @@
-use std::env;
+use std::str::FromStr;
+
+use serde::Deserialize;
 
 /// 환경변수에서 읽어오는 런타임 설정.
 #[derive(Debug, Clone)]
@@ -42,28 +44,67 @@ pub struct Settings {
 impl Settings {
     /// 환경변수를 읽고 비어 있는 값은 기본값으로 채웁니다.
     pub fn load() -> Self {
-        let default = Self::default();
-        Self {
-            debug: env_bool("DEBUG", default.debug),
-            use_in_memory_store: env_bool("USE_IN_MEMORY_STORE", default.use_in_memory_store),
-            redis_url: env_string("REDIS_URL", &default.redis_url),
-            smtp_host: env_string("SMTP_HOST", &default.smtp_host),
-            smtp_port: env_u16("SMTP_PORT", default.smtp_port),
-            smtp_max_connections: env_usize("SMTP_MAX_CONNECTIONS", default.smtp_max_connections)
-                .max(1),
-            sms_inbound_address: env_string("SMS_INBOUND_ADDRESS", &default.sms_inbound_address),
-            dump_inbound: env_bool("DUMP_INBOUND", default.dump_inbound),
-            http_host: env_string("HTTP_HOST", &default.http_host),
-            http_port: env_u16("HTTP_PORT", default.http_port),
-            http_max_connections: env_usize("HTTP_MAX_CONNECTIONS", default.http_max_connections)
-                .max(1),
-            cors_allow_origins: env_list("CORS_ALLOW_ORIGINS", default.cors_allow_origins),
-            auth_ttl_seconds: env_u64("AUTH_TTL_SECONDS", default.auth_ttl_seconds),
-            verified_ttl_seconds: env_u64("VERIFIED_TTL_SECONDS", default.verified_ttl_seconds),
-            jwt_private_key_pem: env_string("JWT_PRIVATE_KEY", &default.jwt_private_key_pem),
-            jwt_issuer: env_string("JWT_ISSUER", &default.jwt_issuer),
-            jwt_ttl_seconds: env_u64("JWT_TTL_SECONDS", default.jwt_ttl_seconds),
+        Self::from_env_settings(EnvSettings::load())
+    }
+
+    fn from_env_settings(env: EnvSettings) -> Self {
+        let mut settings = Self::default();
+
+        if let Some(value) = env.debug {
+            settings.debug = value;
         }
+        if let Some(value) = env.use_in_memory_store {
+            settings.use_in_memory_store = value;
+        }
+        if let Some(value) = env.redis_url {
+            settings.redis_url = value;
+        }
+        if let Some(value) = env.smtp_host {
+            settings.smtp_host = value;
+        }
+        if let Some(value) = env.smtp_port {
+            settings.smtp_port = value;
+        }
+        if let Some(value) = env.smtp_max_connections {
+            settings.smtp_max_connections = value;
+        }
+        if let Some(value) = env.sms_inbound_address {
+            settings.sms_inbound_address = value;
+        }
+        if let Some(value) = env.dump_inbound {
+            settings.dump_inbound = value;
+        }
+        if let Some(value) = env.http_host {
+            settings.http_host = value;
+        }
+        if let Some(value) = env.http_port {
+            settings.http_port = value;
+        }
+        if let Some(value) = env.http_max_connections {
+            settings.http_max_connections = value;
+        }
+        if let Some(value) = env.cors_allow_origins {
+            settings.cors_allow_origins = value;
+        }
+        if let Some(value) = env.auth_ttl_seconds {
+            settings.auth_ttl_seconds = value;
+        }
+        if let Some(value) = env.verified_ttl_seconds {
+            settings.verified_ttl_seconds = value;
+        }
+        if let Some(value) = env.jwt_private_key_pem {
+            settings.jwt_private_key_pem = value;
+        }
+        if let Some(value) = env.jwt_issuer {
+            settings.jwt_issuer = value;
+        }
+        if let Some(value) = env.jwt_ttl_seconds {
+            settings.jwt_ttl_seconds = value;
+        }
+
+        settings.smtp_max_connections = settings.smtp_max_connections.max(1);
+        settings.http_max_connections = settings.http_max_connections.max(1);
+        settings
     }
 }
 
@@ -91,62 +132,110 @@ impl Default for Settings {
     }
 }
 
-fn env_string(key: &str, default: &str) -> String {
-    env::var(key).unwrap_or_else(|_| default.to_string())
+#[derive(Debug, Default, Deserialize)]
+struct EnvSettings {
+    #[serde(default, deserialize_with = "deserialize_optional_bool")]
+    debug: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_optional_bool")]
+    use_in_memory_store: Option<bool>,
+    redis_url: Option<String>,
+    smtp_host: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_u16")]
+    smtp_port: Option<u16>,
+    #[serde(default, deserialize_with = "deserialize_optional_usize")]
+    smtp_max_connections: Option<usize>,
+    sms_inbound_address: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_bool")]
+    dump_inbound: Option<bool>,
+    http_host: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_u16")]
+    http_port: Option<u16>,
+    #[serde(default, deserialize_with = "deserialize_optional_usize")]
+    http_max_connections: Option<usize>,
+    #[serde(default, deserialize_with = "deserialize_optional_list")]
+    cors_allow_origins: Option<Vec<String>>,
+    #[serde(default, deserialize_with = "deserialize_optional_u64")]
+    auth_ttl_seconds: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_optional_u64")]
+    verified_ttl_seconds: Option<u64>,
+    #[serde(rename = "jwt_private_key")]
+    jwt_private_key_pem: Option<String>,
+    jwt_issuer: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_u64")]
+    jwt_ttl_seconds: Option<u64>,
 }
 
-fn env_bool(key: &str, default: bool) -> bool {
-    let Some(val) = env::var(key).ok() else {
-        return default;
-    };
-
-    match val.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => true,
-        "0" | "false" | "no" | "off" => false,
-        _ => default,
+impl EnvSettings {
+    fn load() -> Self {
+        envy::from_env().unwrap_or_else(|err| {
+            eprintln!("warning: ignoring invalid environment configuration: {err}");
+            Self::default()
+        })
     }
 }
 
-fn env_u16(key: &str, default: u16) -> u16 {
-    env::var(key)
-        .ok()
-        .and_then(|val| val.trim().parse().ok())
-        .unwrap_or(default)
-}
-
-fn env_u64(key: &str, default: u64) -> u64 {
-    env::var(key)
-        .ok()
-        .and_then(|val| val.trim().parse().ok())
-        .unwrap_or(default)
-}
-
-fn env_usize(key: &str, default: usize) -> usize {
-    env::var(key)
-        .ok()
-        .and_then(|val| val.trim().parse().ok())
-        .unwrap_or(default)
-}
-
-fn env_list(key: &str, default: Vec<String>) -> Vec<String> {
-    let Ok(val) = env::var(key) else {
-        return default;
+fn deserialize_optional_bool<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(value) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
     };
 
-    let trimmed = val.trim();
+    Ok(match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    })
+}
+
+fn deserialize_optional_u16<'de, D>(deserializer: D) -> Result<Option<u16>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_from_str(deserializer)
+}
+
+fn deserialize_optional_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_from_str(deserializer)
+}
+
+fn deserialize_optional_usize<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_from_str(deserializer)
+}
+
+fn deserialize_optional_from_str<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: FromStr,
+{
+    Ok(Option::<String>::deserialize(deserializer)?
+        .and_then(|value| value.trim().parse::<T>().ok()))
+}
+
+fn deserialize_optional_list<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(value) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+
+    let trimmed = value.trim();
     if trimmed.is_empty() {
-        return default;
+        return Ok(None);
     }
 
     if trimmed.starts_with('[') {
-        match serde_json::from_str::<Vec<String>>(trimmed) {
-            Ok(parsed) if !parsed.is_empty() => return parsed,
-            Ok(_) => return default,
-            Err(err) => {
-                eprintln!("warning: ignoring invalid JSON in {key}: {err}");
-                return default;
-            }
-        }
+        return Ok(serde_json::from_str::<Vec<String>>(trimmed)
+            .ok()
+            .filter(|parsed| !parsed.is_empty()));
     }
 
     let out: Vec<String> = trimmed
@@ -155,60 +244,76 @@ fn env_list(key: &str, default: Vec<String>) -> Vec<String> {
         .filter(|s| !s.is_empty())
         .collect();
     if out.is_empty() {
-        default
+        Ok(None)
     } else {
-        out
+        Ok(Some(out))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+
+    fn settings_from_env(values: &[(&str, &str)]) -> Settings {
+        let env = envy::from_iter::<_, EnvSettings>(
+            values
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string())),
+        )
+        .unwrap();
+        Settings::from_env_settings(env)
+    }
 
     #[test]
     fn test_env_bool() {
-        env::set_var("TEST_BOOL_VAL", "yes");
-        assert!(env_bool("TEST_BOOL_VAL", false));
+        assert!(settings_from_env(&[("DEBUG", "yes")]).debug);
+        assert!(!settings_from_env(&[("DEBUG", "off")]).debug);
 
-        env::set_var("TEST_BOOL_VAL", "off");
-        assert!(!env_bool("TEST_BOOL_VAL", true));
+        let settings = settings_from_env(&[("DEBUG", "unknown"), ("DUMP_INBOUND", "TRUE")]);
+        assert!(!settings.debug);
+        assert!(settings.dump_inbound);
+    }
 
-        env::set_var("TEST_BOOL_VAL", "unknown");
-        assert!(env_bool("TEST_BOOL_VAL", true));
+    #[test]
+    fn test_env_numbers() {
+        let settings = settings_from_env(&[
+            ("SMTP_PORT", "2526"),
+            ("HTTP_PORT", " 9000 "),
+            ("SMTP_MAX_CONNECTIONS", "0"),
+            ("HTTP_MAX_CONNECTIONS", "not-a-number"),
+        ]);
 
-        assert!(env_bool("TEST_BOOL_MISSING", true));
+        assert_eq!(settings.smtp_port, 2526);
+        assert_eq!(settings.http_port, 9000);
+        assert_eq!(settings.smtp_max_connections, 1);
+        assert_eq!(settings.http_max_connections, 1024);
     }
 
     #[test]
     fn test_env_list() {
-        let def = vec!["*".to_string()];
-
-        env::set_var("TEST_LIST_VAL", "a, b, ,c");
-        assert_eq!(env_list("TEST_LIST_VAL", def.clone()), vec!["a", "b", "c"]);
-
-        env::set_var(
-            "TEST_LIST_VAL",
-            r#"["https://a.example","https://b.example"]"#,
-        );
         assert_eq!(
-            env_list("TEST_LIST_VAL", def.clone()),
+            settings_from_env(&[("CORS_ALLOW_ORIGINS", "a, b, ,c")]).cors_allow_origins,
+            vec!["a", "b", "c"]
+        );
+
+        assert_eq!(
+            settings_from_env(&[(
+                "CORS_ALLOW_ORIGINS",
+                r#"["https://a.example","https://b.example"]"#
+            )])
+            .cors_allow_origins,
             vec!["https://a.example", "https://b.example"]
         );
 
-        env::set_var("TEST_LIST_VAL", "[]");
-        assert_eq!(env_list("TEST_LIST_VAL", def.clone()), def);
-
-        env::set_var("TEST_LIST_VAL", "  ");
-        assert_eq!(env_list("TEST_LIST_VAL", def.clone()), def);
-    }
-
-    #[test]
-    fn test_env_usize() {
-        env::set_var("TEST_USIZE_VAL", "42");
-        assert_eq!(env_usize("TEST_USIZE_VAL", 7), 42);
-
-        env::set_var("TEST_USIZE_VAL", "not-a-number");
-        assert_eq!(env_usize("TEST_USIZE_VAL", 7), 7);
+        assert_eq!(
+            settings_from_env(&[("CORS_ALLOW_ORIGINS", "[]")]).cors_allow_origins,
+            vec!["*"]
+        );
+        assert_eq!(
+            settings_from_env(&[("CORS_ALLOW_ORIGINS", "  ")]).cors_allow_origins,
+            vec!["*"]
+        );
     }
 
     #[test]

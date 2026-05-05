@@ -29,6 +29,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time",
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 redis = { version = "1", features = ["tokio-comp", "connection-manager"] }
+envy = "0.4"
 ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
 base64 = "0.22"
 getrandom = "0.2"
