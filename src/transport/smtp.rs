@@ -566,7 +566,7 @@ async fn read_line_limited(
 ) -> io::Result<Option<Vec<u8>>> {
     let mut line = Vec::new();
     let fut = async {
-        let mut taker = (reader as &mut BufReader<TcpStream>).take(limit.saturating_add(1) as u64);
+        let mut taker = reader.take(limit.saturating_add(1) as u64);
         taker.read_until(b'\n', &mut line).await
     };
 

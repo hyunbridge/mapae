@@ -1,8 +1,7 @@
-use std::array::from_fn;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::{StorageError, Store};
@@ -24,19 +23,22 @@ const PRUNE_INTERVAL: Duration = Duration::from_secs(60);
 ///
 /// 데이터는 영속화되지 않으며 프로세스 간 공유되지 않습니다.
 pub struct MemoryStore {
-    stripes: Arc<[Mutex<Stripe>; STRIPE_COUNT]>,
+    stripes: Box<[Mutex<Stripe>]>,
 }
 
 impl MemoryStore {
     /// 비어 있는 striped in-memory 저장소를 생성합니다.
     pub fn new() -> Self {
         Self {
-            stripes: Arc::new(from_fn(|_| {
-                Mutex::new(Stripe {
-                    entries: HashMap::new(),
-                    last_prune: Instant::now(),
+            stripes: (0..STRIPE_COUNT)
+                .map(|_| {
+                    Mutex::new(Stripe {
+                        entries: HashMap::new(),
+                        last_prune: Instant::now(),
+                    })
                 })
-            })),
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
         }
     }
 }
@@ -129,6 +131,7 @@ impl Store for MemoryStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_set_ex_get_take_flow() {
