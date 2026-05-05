@@ -36,6 +36,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 mailparse = "0.16"
 mail-auth = { version = "0.8", default-features = false, features = ["ring"] }
+quoted_printable = "0.5"
 time = { version = "0.3", features = ["formatting", "macros"] }
 jsonwebtoken = { version = "10", features = ["use_pem", "ed25519-dalek", "rust_crypto"] }
 hyper-util = { version = "0.1.20", features = ["server", "http1", "http2", "tokio", "service"] }

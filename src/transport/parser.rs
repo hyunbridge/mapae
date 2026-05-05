@@ -703,90 +703,14 @@ fn scan_quoted_printable<R: Read + ?Sized>(
     raw: &mut R,
     scanner: &mut NonceScanner,
 ) -> io::Result<()> {
-    enum State {
-        Normal,
-        AfterEquals,
-        Hex1(u8),
-        SoftCr,
+    let mut encoded = Vec::new();
+    raw.read_to_end(&mut encoded)?;
+
+    if let Ok(decoded) = quoted_printable::decode(&encoded, quoted_printable::ParseMode::Robust) {
+        scanner.scan(&decoded);
     }
 
-    fn scan_literal(scanner: &mut NonceScanner, byte: u8) {
-        scanner.scan(&[byte]);
-    }
-
-    let mut state = State::Normal;
-    let mut buf = [0u8; READ_BUFFER_SIZE];
-
-    loop {
-        let n = raw.read(&mut buf)?;
-        if n == 0 {
-            match state {
-                State::AfterEquals => scan_literal(scanner, b'='),
-                State::Hex1(first) => {
-                    scan_literal(scanner, b'=');
-                    scan_literal(scanner, first);
-                }
-                State::SoftCr => {}
-                State::Normal => {}
-            }
-            return Ok(());
-        }
-
-        for &b in &buf[..n] {
-            match state {
-                State::Normal => {
-                    if b == b'=' {
-                        state = State::AfterEquals;
-                    } else {
-                        scan_literal(scanner, b);
-                    }
-                }
-                State::AfterEquals => {
-                    if b == b'\r' {
-                        state = State::SoftCr;
-                    } else if b == b'\n' {
-                        state = State::Normal;
-                    } else if b.is_ascii_hexdigit() {
-                        state = State::Hex1(b);
-                    } else {
-                        scan_literal(scanner, b'=');
-                        scan_literal(scanner, b);
-                        state = State::Normal;
-                    }
-                }
-                State::Hex1(first) => {
-                    if b.is_ascii_hexdigit() {
-                        let decoded = (hex_value(first) << 4) | hex_value(b);
-                        scan_literal(scanner, decoded);
-                    } else {
-                        scan_literal(scanner, b'=');
-                        scan_literal(scanner, first);
-                        scan_literal(scanner, b);
-                    }
-                    state = State::Normal;
-                }
-                State::SoftCr => {
-                    if b != b'\n' {
-                        scan_literal(scanner, b);
-                    }
-                    state = State::Normal;
-                }
-            }
-
-            if scanner.found() {
-                return drain_to_end(raw);
-            }
-        }
-    }
-}
-
-fn hex_value(byte: u8) -> u8 {
-    match byte {
-        b'0'..=b'9' => byte - b'0',
-        b'a'..=b'f' => byte - b'a' + 10,
-        b'A'..=b'F' => byte - b'A' + 10,
-        _ => 0,
-    }
+    Ok(())
 }
 
 fn drain_to_end<R: Read + ?Sized>(reader: &mut R) -> io::Result<()> {
@@ -940,6 +864,22 @@ mod tests {
         let nonce = "c".repeat(NONCE_HEX_LENGTH);
         let raw = format!(
             "From: 01012345678@mms.kt.co.kr\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n=5BMAPAE:{nonce}=5D"
+        );
+
+        let got = extract_header_from_and_nonce(raw.as_bytes(), raw.len()).unwrap();
+        assert_eq!(got.nonce, nonce);
+    }
+
+    #[test]
+    fn test_extract_header_from_and_nonce_quoted_printable_soft_break() {
+        let nonce = "c".repeat(NONCE_HEX_LENGTH);
+        let raw = format!(
+            "From: 01012345678@mms.kt.co.kr\r\n\
+             Content-Transfer-Encoding: quoted-printable\r\n\
+             \r\n\
+             =5BMAPAE:{}=\r\n{}=5D",
+            &nonce[..32],
+            &nonce[32..]
         );
 
         let got = extract_header_from_and_nonce(raw.as_bytes(), raw.len()).unwrap();
