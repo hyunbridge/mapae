@@ -1150,6 +1150,7 @@ dependencies = [
  "jsonwebtoken",
  "mail-auth",
  "mailparse",
+ "moka",
  "percent-encoding",
  "pkcs8",
  "quoted_printable",

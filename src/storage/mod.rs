@@ -10,8 +10,6 @@ use thiserror::Error;
 pub enum StorageError {
     #[error("invalid ttl")]
     InvalidTtl,
-    #[error("memory store lock poisoned")]
-    MemoryLockPoisoned,
     #[error("redis error: {0}")]
     Redis(#[from] ::redis::RedisError),
 }
