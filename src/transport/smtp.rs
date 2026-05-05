@@ -736,27 +736,72 @@ async fn process_extracted_email(
     let nonce = extract_result.nonce;
     let bytes_read = extract_result.bytes_read;
 
-    if config.dump_inbound {
-        info!(
-            "MAIL FROM: {} | HEADER FROM: {} | PEER: {}",
-            session.mail_from, header_from, peer
-        );
-        if let Some(data) = data_preview {
-            info!(
-                "BODY: {}",
-                String::from_utf8_lossy(data)
-                    .chars()
-                    .take(500)
-                    .collect::<String>()
-            );
-        }
+    log_inbound_email(config, session, &header_from, &peer, data_preview);
+
+    let sender =
+        select_verified_sender(config, authenticator, session, &header_from, &peer).await?;
+
+    if !parser::is_valid_nonce(&nonce) {
+        warn!("Invalid nonce format from {}", peer);
+        return Err(SmtpReply::new(550, "Invalid nonce", Some("5.7.1")));
     }
 
+    let auth_id = consume_nonce(auth_service, &nonce).await?;
+    store_verification(auth_service, &auth_id, &sender).await?;
+
+    info!(
+        "Stored verification for auth_id={} phone={:?} carrier={:?} bytes_read={}",
+        auth_id,
+        sender.phone,
+        Some(sender.carrier.as_str()),
+        bytes_read
+    );
+    Ok(())
+}
+
+fn log_inbound_email(
+    config: &Settings,
+    session: &SmtpSession,
+    header_from: &str,
+    peer: &str,
+    data_preview: Option<&[u8]>,
+) {
+    if !config.dump_inbound {
+        return;
+    }
+
+    info!(
+        "MAIL FROM: {} | HEADER FROM: {} | PEER: {}",
+        session.mail_from, header_from, peer
+    );
+    if let Some(data) = data_preview {
+        info!(
+            "BODY: {}",
+            String::from_utf8_lossy(data)
+                .chars()
+                .take(500)
+                .collect::<String>()
+        );
+    }
+}
+
+struct VerifiedSender {
+    phone: Option<String>,
+    carrier: String,
+}
+
+async fn select_verified_sender(
+    config: &Settings,
+    authenticator: &MessageAuthenticator,
+    session: &SmtpSession,
+    header_from: &str,
+    peer: &str,
+) -> Result<VerifiedSender, SmtpReply> {
     let (env_phone, env_carrier) = parser::extract_phone_and_carrier(&session.mail_from);
-    let (hdr_phone, hdr_carrier) = parser::extract_phone_and_carrier(&header_from);
+    let (hdr_phone, hdr_carrier) = parser::extract_phone_and_carrier(header_from);
 
     let env_sender = normalize_email_address(&session.mail_from);
-    let hdr_sender = normalize_email_address(&header_from);
+    let hdr_sender = normalize_email_address(header_from);
     let peer_ip = session.peer_addr.ip();
     let host_domain = smtp_host_domain(config);
     let env_spf = check_spf(
@@ -808,18 +853,17 @@ async fn process_extracted_email(
         (None, None)
     };
 
-    if carrier.is_none() {
+    let Some(carrier) = carrier else {
         warn!("Carrier domain not recognized from {}", peer);
         return Err(SmtpReply::new(550, "Invalid carrier domain", Some("5.7.1")));
-    }
+    };
 
-    if !parser::is_valid_nonce(&nonce) {
-        warn!("Invalid nonce format from {}", peer);
-        return Err(SmtpReply::new(550, "Invalid nonce", Some("5.7.1")));
-    }
+    Ok(VerifiedSender { phone, carrier })
+}
 
+async fn consume_nonce(auth_service: &Service, nonce: &str) -> Result<String, SmtpReply> {
     let (auth_id, ok) = auth_service
-        .consume_auth_id_by_nonce(&nonce)
+        .consume_auth_id_by_nonce(nonce)
         .await
         .map_err(|e| {
             error!("Store error while consuming nonce: {}", e);
@@ -831,19 +875,25 @@ async fn process_extracted_email(
         return Err(SmtpReply::new(550, "Invalid nonce", Some("5.7.1")));
     }
 
+    Ok(auth_id)
+}
+
+async fn store_verification(
+    auth_service: &Service,
+    auth_id: &str,
+    sender: &VerifiedSender,
+) -> Result<(), SmtpReply> {
     auth_service
-        .store_verified(&auth_id, phone.as_deref(), carrier.as_deref())
+        .store_verified(
+            auth_id,
+            sender.phone.as_deref(),
+            Some(sender.carrier.as_str()),
+        )
         .await
         .map_err(|e| {
             error!("Failed to store verification: {}", e);
             SmtpReply::new(451, "Temporary server error", Some("4.3.0"))
-        })?;
-
-    info!(
-        "Stored verification for auth_id={} phone={:?} carrier={:?} bytes_read={}",
-        auth_id, phone, carrier, bytes_read
-    );
-    Ok(())
+        })
 }
 
 fn normalize_email_address(value: &str) -> Option<String> {
