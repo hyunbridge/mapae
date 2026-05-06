@@ -33,6 +33,7 @@ const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 const ERROR_INTERNAL_SERVER: &str = "Internal server error";
 const ERROR_INVALID_AUTH_ID: &str = "Invalid auth_id";
+const CORS_ALLOWED_HEADERS: [&str; 2] = ["authorization", "content-type"];
 
 /// 프론트엔드 및 백엔드 클라이언트가 접근하는 HTTP API 데몬을 실행합니다.
 ///
@@ -43,34 +44,24 @@ pub async fn run(
     auth_service: Arc<Service>,
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
-    let auth = auth_service.clone();
     let cors_origins: Vec<String> = config.cors_allow_origins.clone();
-
-    let cors = {
-        let builder = warp::cors()
-            .allow_methods(vec!["GET", "POST", "OPTIONS"])
-            .allow_headers(vec!["*"]);
-
-        if cors_origins.iter().any(|origin| origin == "*") {
-            builder.allow_any_origin().build()
-        } else {
-            builder
-                .allow_origins(cors_origins.iter().map(|origin| origin.as_str()))
-                .build()
-        }
-    };
+    let cors = build_cors(&cors_origins);
+    if allows_any_cors_origin(&cors_origins) {
+        warn!("HTTP CORS allows any origin; set CORS_ALLOW_ORIGINS for production deployments");
+    }
+    let auth_filter = with_auth(auth_service);
 
     let health = warp::path("health")
         .and(warp::path::end())
         .and(warp::get())
-        .and(with_auth(auth.clone()))
+        .and(auth_filter.clone())
         .and_then(health_handler);
 
     let auth_init = warp::path("auth")
         .and(warp::path("init"))
         .and(warp::path::end())
         .and(warp::post())
-        .and(with_auth(auth.clone()))
+        .and(auth_filter.clone())
         .and_then(auth_init_handler);
 
     let auth_check = warp::path("auth")
@@ -78,7 +69,7 @@ pub async fn run(
         .and(warp::path::param::<String>())
         .and(warp::path::end())
         .and(warp::get())
-        .and(with_auth(auth.clone()))
+        .and(auth_filter.clone())
         .and_then(auth_check_handler);
 
     let auth_check_signed = warp::path("auth")
@@ -86,14 +77,14 @@ pub async fn run(
         .and(warp::path::param::<String>())
         .and(warp::path::end())
         .and(warp::get())
-        .and(with_auth(auth.clone()))
+        .and(auth_filter.clone())
         .and_then(auth_check_signed_handler);
 
     let jwks = warp::path(".well-known")
         .and(warp::path("jwks.json"))
         .and(warp::path::end())
         .and(warp::get())
-        .and(with_auth(auth.clone()))
+        .and(auth_filter)
         .and_then(jwks_handler);
 
     let routes = health
@@ -201,6 +192,24 @@ async fn reject_http_connection(mut stream: TcpStream) {
     if let Err(err) = stream.shutdown().await {
         warn!("HTTP reject shutdown failed: {}", err);
     }
+}
+
+fn build_cors(origins: &[String]) -> warp::filters::cors::Cors {
+    let builder = warp::cors()
+        .allow_methods(vec!["GET", "POST", "OPTIONS"])
+        .allow_headers(CORS_ALLOWED_HEADERS);
+
+    if allows_any_cors_origin(origins) {
+        builder.allow_any_origin().build()
+    } else {
+        builder
+            .allow_origins(origins.iter().map(|origin| origin.as_str()))
+            .build()
+    }
+}
+
+fn allows_any_cors_origin(origins: &[String]) -> bool {
+    origins.iter().any(|origin| origin.trim() == "*")
 }
 
 fn with_auth(
@@ -344,5 +353,25 @@ fn response_with_json_body(status: StatusCode, body: Vec<u8>) -> warp::http::Res
 fn error_response(detail: &str) -> ErrorResponse {
     ErrorResponse {
         detail: detail.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{allows_any_cors_origin, build_cors};
+
+    #[test]
+    fn cors_origin_wildcard_is_explicit() {
+        assert!(allows_any_cors_origin(&["*".to_string()]));
+        assert!(allows_any_cors_origin(&[" * ".to_string()]));
+        assert!(!allows_any_cors_origin(
+            &["https://example.com".to_string()]
+        ));
+    }
+
+    #[test]
+    fn cors_filter_builds_for_wildcard_and_explicit_origins() {
+        let _ = build_cors(&["*".to_string()]);
+        let _ = build_cors(&["https://example.com".to_string()]);
     }
 }
