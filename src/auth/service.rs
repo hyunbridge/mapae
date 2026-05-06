@@ -7,6 +7,11 @@ use time::OffsetDateTime;
 
 use super::jwt_signer::{JwtError, JwtSigner};
 
+const AUTH_ID_BYTES: usize = 16;
+const AUTH_ID_HEX_LENGTH: usize = AUTH_ID_BYTES * 2;
+const NONCE_BYTES: usize = 32;
+const NONCE_HEX_LENGTH: usize = NONCE_BYTES * 2;
+
 /// 클라이언트가 인증 세션을 시작할 때 받는 응답.
 #[derive(Debug, Serialize)]
 pub struct AuthInitResponse {
@@ -117,8 +122,8 @@ impl Service {
     /// 내부적으로 32바이트 Nonce와 16바이트 `auth_id`를 생성하여 분리 저장하며,
     /// 클라이언트가 SMS를 전송할 수 있는 딥링크(`sms:`)를 반환합니다.
     pub async fn init_auth(&self) -> Result<AuthInitResponse, AuthError> {
-        let nonce = random_hex(32)?;
-        let auth_id = random_hex(16)?;
+        let nonce = random_hex(NONCE_BYTES)?;
+        let auth_id = random_hex(AUTH_ID_BYTES)?;
 
         let payload = AuthPayload {
             status: AuthStatus::Pending,
@@ -243,7 +248,7 @@ impl Service {
 }
 
 fn is_valid_auth_id(auth_id: &str) -> bool {
-    auth_id.len() == 32 && auth_id.chars().all(|c| c.is_ascii_hexdigit())
+    auth_id.len() == AUTH_ID_HEX_LENGTH && auth_id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn auth_check_response(status: AuthStatus) -> AuthCheckResponse {
@@ -292,11 +297,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_random_hex() {
-        let val = random_hex(16).unwrap();
-        assert_eq!(val.len(), 32);
+        let val = random_hex(AUTH_ID_BYTES).unwrap();
+        assert_eq!(val.len(), AUTH_ID_HEX_LENGTH);
         assert!(val.chars().all(|c| c.is_ascii_hexdigit()));
 
         assert!(random_hex(0).is_err());
+    }
+
+    #[test]
+    fn test_auth_id_validation_uses_16_byte_hex_encoding() {
+        assert_eq!(AUTH_ID_HEX_LENGTH, 32);
+        assert_eq!(NONCE_HEX_LENGTH, 64);
+
+        assert!(is_valid_auth_id(&"a".repeat(AUTH_ID_HEX_LENGTH)));
+        assert!(!is_valid_auth_id(&"a".repeat(AUTH_ID_HEX_LENGTH - 1)));
+        assert!(!is_valid_auth_id(&"a".repeat(AUTH_ID_HEX_LENGTH + 1)));
+        assert!(!is_valid_auth_id(&format!(
+            "{}z",
+            "a".repeat(AUTH_ID_HEX_LENGTH - 1)
+        )));
     }
 
     #[tokio::test]
@@ -313,7 +332,7 @@ mod tests {
         let svc = Service::new(crate::storage::StoreBackend::memory(store), &settings).unwrap();
 
         let init = svc.init_auth().await.unwrap();
-        assert_eq!(init.auth_id.len(), 32);
+        assert_eq!(init.auth_id.len(), AUTH_ID_HEX_LENGTH);
         assert!(init.auth_id.chars().all(|c| c.is_ascii_hexdigit()));
         assert!(init.sms_body.starts_with("[MAPAE:"));
         assert_eq!(
@@ -356,7 +375,7 @@ mod tests {
     #[tokio::test]
     async fn test_check_signed_broken_payload_maps_to_waiting() {
         let store = MemoryStore::new();
-        let auth_id = "b".repeat(32);
+        let auth_id = "b".repeat(AUTH_ID_HEX_LENGTH);
         store
             .set_ex(&format!("auth:{auth_id}"), "not-json", 60)
             .await
@@ -383,7 +402,7 @@ mod tests {
         let store = MemoryStore::new();
         let settings = Settings::default();
         let svc = Service::new(crate::storage::StoreBackend::memory(store), &settings).unwrap();
-        let auth_id = "c".repeat(32);
+        let auth_id = "c".repeat(AUTH_ID_HEX_LENGTH);
 
         svc.store_verified(&auth_id, Some("01012345678"), Some("KT"))
             .await

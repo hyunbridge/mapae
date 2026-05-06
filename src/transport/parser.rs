@@ -8,7 +8,8 @@ mod nonce;
 use mime::{drain_to_end, read_mime_headers, scan_entity, CountingLimitReader};
 use nonce::NonceScanner;
 
-const NONCE_HEX_LENGTH: usize = 64;
+const NONCE_BYTES: usize = 32;
+const NONCE_HEX_LENGTH: usize = NONCE_BYTES * 2;
 const MAX_MIME_DEPTH: usize = 5;
 const READ_BUFFER_SIZE: usize = 4096;
 
@@ -309,8 +310,8 @@ mod tests {
              Content-Transfer-Encoding: quoted-printable\r\n\
              \r\n\
              =5BMAPAE:{}=\r\n{}=5D",
-            &nonce[..32],
-            &nonce[32..]
+            &nonce[..NONCE_HEX_LENGTH / 2],
+            &nonce[NONCE_HEX_LENGTH / 2..]
         );
 
         let got = extract_header_from_and_nonce(raw.as_bytes(), raw.len()).unwrap();
