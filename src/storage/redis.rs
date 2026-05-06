@@ -1,4 +1,4 @@
-use super::{StorageError, Store};
+use super::{StorageError, Store, StoreFuture};
 
 /// 인증 상태를 공유하기 위한 Redis 저장소.
 pub struct RedisStore {
@@ -15,39 +15,48 @@ impl RedisStore {
 }
 
 impl Store for RedisStore {
-    async fn ping(&self) -> Result<(), StorageError> {
-        let mut conn = self.connection.clone();
-        redis::cmd("PING")
-            .query_async::<String>(&mut conn)
-            .await
-            .map_err(StorageError::from)?;
-        Ok(())
+    fn ping(&self) -> StoreFuture<'_, ()> {
+        Box::pin(async move {
+            let mut conn = self.connection.clone();
+            redis::cmd("PING")
+                .query_async::<String>(&mut conn)
+                .await
+                .map_err(StorageError::from)?;
+            Ok(())
+        })
     }
 
-    async fn get(&self, key: &str) -> Result<(String, bool), StorageError> {
-        let mut conn = self.connection.clone();
-        let result: Option<String> = redis::cmd("GET").arg(key).query_async(&mut conn).await?;
-        result.map_or_else(|| Ok((String::new(), false)), |val| Ok((val, true)))
+    fn get<'a>(&'a self, key: &'a str) -> StoreFuture<'a, (String, bool)> {
+        Box::pin(async move {
+            let mut conn = self.connection.clone();
+            let result: Option<String> = redis::cmd("GET").arg(key).query_async(&mut conn).await?;
+            result.map_or_else(|| Ok((String::new(), false)), |val| Ok((val, true)))
+        })
     }
 
-    async fn take(&self, key: &str) -> Result<(String, bool), StorageError> {
-        let mut conn = self.connection.clone();
-        let result: Option<String> = redis::cmd("GETDEL").arg(key).query_async(&mut conn).await?;
-        result.map_or_else(|| Ok((String::new(), false)), |val| Ok((val, true)))
+    fn take<'a>(&'a self, key: &'a str) -> StoreFuture<'a, (String, bool)> {
+        Box::pin(async move {
+            let mut conn = self.connection.clone();
+            let result: Option<String> =
+                redis::cmd("GETDEL").arg(key).query_async(&mut conn).await?;
+            result.map_or_else(|| Ok((String::new(), false)), |val| Ok((val, true)))
+        })
     }
 
-    async fn set_ex(&self, key: &str, value: &str, ttl_seconds: u64) -> Result<(), StorageError> {
-        if ttl_seconds == 0 {
-            return Err(StorageError::InvalidTtl);
-        }
-        let mut conn = self.connection.clone();
-        redis::cmd("SETEX")
-            .arg(key)
-            .arg(ttl_seconds)
-            .arg(value)
-            .query_async::<()>(&mut conn)
-            .await?;
-        Ok(())
+    fn set_ex<'a>(&'a self, key: &'a str, value: &'a str, ttl_seconds: u64) -> StoreFuture<'a, ()> {
+        Box::pin(async move {
+            if ttl_seconds == 0 {
+                return Err(StorageError::InvalidTtl);
+            }
+            let mut conn = self.connection.clone();
+            redis::cmd("SETEX")
+                .arg(key)
+                .arg(ttl_seconds)
+                .arg(value)
+                .query_async::<()>(&mut conn)
+                .await?;
+            Ok(())
+        })
     }
 }
 

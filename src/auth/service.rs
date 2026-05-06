@@ -1,5 +1,5 @@
 use crate::config::Settings;
-use crate::storage::{StorageError, Store, StoreBackend};
+use crate::storage::{StorageError, StoreBackend};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -310,7 +310,7 @@ mod tests {
             jwt_ttl_seconds: 120,
             ..Settings::default()
         };
-        let svc = Service::new(crate::storage::StoreBackend::Memory(store), &settings).unwrap();
+        let svc = Service::new(crate::storage::StoreBackend::memory(store), &settings).unwrap();
 
         let init = svc.init_auth().await.unwrap();
         assert_eq!(init.auth_id.len(), 32);
@@ -362,7 +362,7 @@ mod tests {
             .await
             .unwrap();
         let settings = Settings::default();
-        let svc = Service::new(crate::storage::StoreBackend::Memory(store), &settings).unwrap();
+        let svc = Service::new(crate::storage::StoreBackend::memory(store), &settings).unwrap();
 
         let check = svc.check_signed(&auth_id).await.unwrap();
         assert_eq!(check.status, AuthStatus::Waiting);
@@ -382,7 +382,7 @@ mod tests {
     async fn test_store_verified_writes_rfc3339_timestamp_without_fraction() {
         let store = MemoryStore::new();
         let settings = Settings::default();
-        let svc = Service::new(crate::storage::StoreBackend::Memory(store), &settings).unwrap();
+        let svc = Service::new(crate::storage::StoreBackend::memory(store), &settings).unwrap();
         let auth_id = "c".repeat(32);
 
         svc.store_verified(&auth_id, Some("01012345678"), Some("KT"))
@@ -407,7 +407,7 @@ mod tests {
             jwt_ttl_seconds: 120,
             ..Settings::default()
         };
-        let svc = Service::new(crate::storage::StoreBackend::Memory(store), &settings).unwrap();
+        let svc = Service::new(crate::storage::StoreBackend::memory(store), &settings).unwrap();
 
         let init = svc.init_auth().await.unwrap();
         let nonce = init

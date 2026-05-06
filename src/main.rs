@@ -56,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
 
     let store = if settings.use_in_memory_store {
         info!("Using in-memory store");
-        storage::StoreBackend::Memory(storage::memory::MemoryStore::new())
+        storage::StoreBackend::memory(storage::memory::MemoryStore::new())
     } else {
         if settings.redis_url.trim().is_empty() {
             anyhow::bail!("REDIS_URL must be set unless USE_IN_MEMORY_STORE=true");
@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
         let store = storage::redis::RedisStore::new(&settings.redis_url)
             .await
             .context("Failed to initialize Redis client")?;
-        storage::StoreBackend::Redis(store)
+        storage::StoreBackend::redis(store)
     };
 
     let auth_service = Arc::new(
