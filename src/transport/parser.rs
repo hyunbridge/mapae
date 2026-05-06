@@ -121,8 +121,20 @@ struct ContentTypeHeader {
     params: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NonceScannerState {
+    Searching,
+    OpenBracket,
+    M,
+    Ma,
+    Map,
+    Mapa,
+    Mapae,
+    HexDigits,
+}
+
 struct NonceScanner {
-    state: u8,
+    state: NonceScannerState,
     digits: Vec<u8>,
     found: Option<String>,
 }
@@ -130,7 +142,7 @@ struct NonceScanner {
 impl NonceScanner {
     fn new() -> Self {
         Self {
-            state: 0,
+            state: NonceScannerState::Searching,
             digits: Vec::with_capacity(NONCE_HEX_LENGTH),
             found: None,
         }
@@ -145,14 +157,14 @@ impl NonceScanner {
     }
 
     fn reset(&mut self) {
-        self.state = 0;
+        self.state = NonceScannerState::Searching;
         self.digits.clear();
     }
 
     fn reset_and_maybe_start(&mut self, b: u8) {
         self.reset();
         if b == b'[' {
-            self.state = 1;
+            self.state = NonceScannerState::OpenBracket;
         }
     }
 
@@ -162,57 +174,57 @@ impl NonceScanner {
         }
 
         match self.state {
-            0 => {
+            NonceScannerState::Searching => {
                 if b == b'[' {
-                    self.state = 1;
+                    self.state = NonceScannerState::OpenBracket;
                 }
             }
-            1 => {
+            NonceScannerState::OpenBracket => {
                 if b.eq_ignore_ascii_case(&b'M') {
-                    self.state = 2;
+                    self.state = NonceScannerState::M;
                 } else if b == b'[' {
-                    self.state = 1;
+                    self.state = NonceScannerState::OpenBracket;
                 } else {
-                    self.state = 0;
+                    self.state = NonceScannerState::Searching;
                 }
             }
-            2 => {
+            NonceScannerState::M => {
                 if b.eq_ignore_ascii_case(&b'A') {
-                    self.state = 3;
+                    self.state = NonceScannerState::Ma;
                 } else {
                     self.reset_and_maybe_start(b);
                 }
             }
-            3 => {
+            NonceScannerState::Ma => {
                 if b.eq_ignore_ascii_case(&b'P') {
-                    self.state = 4;
+                    self.state = NonceScannerState::Map;
                 } else {
                     self.reset_and_maybe_start(b);
                 }
             }
-            4 => {
+            NonceScannerState::Map => {
                 if b.eq_ignore_ascii_case(&b'A') {
-                    self.state = 5;
+                    self.state = NonceScannerState::Mapa;
                 } else {
                     self.reset_and_maybe_start(b);
                 }
             }
-            5 => {
+            NonceScannerState::Mapa => {
                 if b.eq_ignore_ascii_case(&b'E') {
-                    self.state = 6;
+                    self.state = NonceScannerState::Mapae;
                 } else {
                     self.reset_and_maybe_start(b);
                 }
             }
-            6 => {
+            NonceScannerState::Mapae => {
                 if b == b':' {
-                    self.state = 7;
+                    self.state = NonceScannerState::HexDigits;
                     self.digits.clear();
                 } else {
                     self.reset_and_maybe_start(b);
                 }
             }
-            7 => match b {
+            NonceScannerState::HexDigits => match b {
                 b']' => {
                     if self.digits.len() == NONCE_HEX_LENGTH {
                         self.found = Some(String::from_utf8_lossy(&self.digits).into_owned());
@@ -229,7 +241,6 @@ impl NonceScanner {
                 }
                 _ => self.reset_and_maybe_start(b),
             },
-            _ => self.reset(),
         }
     }
 
