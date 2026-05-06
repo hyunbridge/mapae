@@ -749,6 +749,53 @@ struct VerifiedSender {
     carrier: String,
 }
 
+struct SenderCandidate {
+    phone: Option<String>,
+    carrier: Option<String>,
+    sender: Option<String>,
+}
+
+impl SenderCandidate {
+    fn from_address(value: &str) -> Self {
+        let (phone, carrier) = parser::extract_phone_and_carrier(value);
+        Self {
+            phone,
+            carrier,
+            sender: normalize_email_address(value),
+        }
+    }
+
+    fn has_carrier(&self) -> bool {
+        self.carrier.is_some()
+    }
+
+    fn into_verified_sender(self) -> Option<VerifiedSender> {
+        Some(VerifiedSender {
+            phone: self.phone,
+            carrier: self.carrier?,
+        })
+    }
+}
+
+struct SenderSpfChecks {
+    envelope: SpfCheck,
+    header: Option<SpfCheck>,
+}
+
+impl SenderSpfChecks {
+    fn header_pass(&self) -> bool {
+        self.header.as_ref().is_some_and(|check| check.pass)
+    }
+
+    fn any_pass(&self) -> bool {
+        self.envelope.pass || self.header_pass()
+    }
+
+    fn has_temp_error(&self) -> bool {
+        self.envelope.temp_error || self.header.as_ref().is_some_and(|check| check.temp_error)
+    }
+}
+
 async fn select_verified_sender(
     config: &Settings,
     authenticator: &MessageAuthenticator,
@@ -756,68 +803,108 @@ async fn select_verified_sender(
     header_from: &str,
     peer: &str,
 ) -> Result<VerifiedSender, SmtpReply> {
-    let (env_phone, env_carrier) = parser::extract_phone_and_carrier(&session.mail_from);
-    let (hdr_phone, hdr_carrier) = parser::extract_phone_and_carrier(header_from);
-
-    let env_sender = normalize_email_address(&session.mail_from);
-    let hdr_sender = normalize_email_address(header_from);
+    let envelope = SenderCandidate::from_address(&session.mail_from);
+    let header = SenderCandidate::from_address(header_from);
     let peer_ip = session.peer_addr.ip();
     let host_domain = smtp_host_domain(config);
-    let env_spf = check_spf(
+    let checks = check_sender_spf(
         authenticator,
         peer_ip,
-        env_sender.as_deref(),
         session.helo_domain.as_str(),
         host_domain.as_str(),
+        &envelope,
+        &header,
     )
     .await;
-    let env_usable = env_carrier.is_some() && env_spf.pass;
-    let hdr_spf = if env_usable {
+
+    ensure_spf_accepted(&checks, peer, &session.mail_from, header_from)?;
+
+    let Some(sender) = choose_verified_sender(envelope, header, &checks) else {
+        warn!("Carrier domain not recognized from {}", peer);
+        return Err(SmtpReply::new(550, "Invalid carrier domain", Some("5.7.1")));
+    };
+
+    Ok(sender)
+}
+
+async fn check_sender_spf(
+    authenticator: &MessageAuthenticator,
+    peer_ip: IpAddr,
+    helo_domain: &str,
+    host_domain: &str,
+    envelope: &SenderCandidate,
+    header: &SenderCandidate,
+) -> SenderSpfChecks {
+    let envelope_check = check_spf(
+        authenticator,
+        peer_ip,
+        envelope.sender.as_deref(),
+        helo_domain,
+        host_domain,
+    )
+    .await;
+
+    let envelope_usable = envelope_check.pass && envelope.has_carrier();
+    let header_check = if envelope_usable {
         None
     } else {
         Some(
             check_spf(
                 authenticator,
                 peer_ip,
-                hdr_sender.as_deref(),
-                session.helo_domain.as_str(),
-                host_domain.as_str(),
+                header.sender.as_deref(),
+                helo_domain,
+                host_domain,
             )
             .await,
         )
     };
-    let hdr_pass = hdr_spf.as_ref().is_some_and(|check| check.pass);
 
-    if !(env_spf.pass || hdr_pass) {
-        if env_spf.temp_error || hdr_spf.as_ref().is_some_and(|check| check.temp_error) {
-            warn!(
-                "SPF temperror: ip={} mail_from={} header_from={}",
-                peer, session.mail_from, header_from
-            );
-            return Err(SmtpReply::new(451, "SPF temperror", Some("4.7.0")));
-        }
+    SenderSpfChecks {
+        envelope: envelope_check,
+        header: header_check,
+    }
+}
 
-        warn!(
-            "SPF fail: ip={} mail_from={} header_from={}",
-            peer, session.mail_from, header_from
-        );
-        return Err(SmtpReply::new(550, "SPF fail", Some("5.7.1")));
+fn ensure_spf_accepted(
+    checks: &SenderSpfChecks,
+    peer: &str,
+    mail_from: &str,
+    header_from: &str,
+) -> Result<(), SmtpReply> {
+    if checks.any_pass() {
+        return Ok(());
     }
 
-    let (phone, carrier) = if env_usable {
-        (env_phone, env_carrier)
-    } else if hdr_carrier.is_some() && hdr_pass {
-        (hdr_phone, hdr_carrier)
-    } else {
-        (None, None)
-    };
+    if checks.has_temp_error() {
+        warn!(
+            "SPF temperror: ip={} mail_from={} header_from={}",
+            peer, mail_from, header_from
+        );
+        return Err(SmtpReply::new(451, "SPF temperror", Some("4.7.0")));
+    }
 
-    let Some(carrier) = carrier else {
-        warn!("Carrier domain not recognized from {}", peer);
-        return Err(SmtpReply::new(550, "Invalid carrier domain", Some("5.7.1")));
-    };
+    warn!(
+        "SPF fail: ip={} mail_from={} header_from={}",
+        peer, mail_from, header_from
+    );
+    Err(SmtpReply::new(550, "SPF fail", Some("5.7.1")))
+}
 
-    Ok(VerifiedSender { phone, carrier })
+fn choose_verified_sender(
+    envelope: SenderCandidate,
+    header: SenderCandidate,
+    checks: &SenderSpfChecks,
+) -> Option<VerifiedSender> {
+    if checks.envelope.pass && envelope.has_carrier() {
+        return envelope.into_verified_sender();
+    }
+
+    if checks.header_pass() && header.has_carrier() {
+        return header.into_verified_sender();
+    }
+
+    None
 }
 
 async fn consume_nonce(auth_service: &Service, nonce: &str) -> Result<String, SmtpReply> {
@@ -943,9 +1030,10 @@ fn smtp_host_domain(config: &Settings) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_rcpt_allowed, map_stream_parse_error, normalize_email_address, parse_helo_domain,
-        parse_smtp_path, parser, read_data, read_line_limited, smtp_host_domain,
-        stream_extract_data, SmtpReply, APP_NAME, DATA_SIZE_LIMIT_BYTES, SMTP_COMMAND_TIMEOUT,
+        choose_verified_sender, ensure_spf_accepted, is_rcpt_allowed, map_stream_parse_error,
+        normalize_email_address, parse_helo_domain, parse_smtp_path, parser, read_data,
+        read_line_limited, smtp_host_domain, stream_extract_data, SenderCandidate, SenderSpfChecks,
+        SmtpReply, SpfCheck, APP_NAME, DATA_SIZE_LIMIT_BYTES, SMTP_COMMAND_TIMEOUT,
         SMTP_MAX_LINE_BYTES,
     };
     use crate::config::Settings;
@@ -1032,6 +1120,82 @@ mod tests {
         assert!(is_rcpt_allowed("", "verify@example.com"));
         assert!(is_rcpt_allowed("verify@example.com", "VERIFY@example.com"));
         assert!(!is_rcpt_allowed("verify@example.com", "other@example.com"));
+    }
+
+    fn sender_candidate(phone: Option<&str>, carrier: Option<&str>) -> SenderCandidate {
+        SenderCandidate {
+            phone: phone.map(str::to_string),
+            carrier: carrier.map(str::to_string),
+            sender: Some("sender@example.com".to_string()),
+        }
+    }
+
+    fn spf_check(pass: bool, temp_error: bool) -> SpfCheck {
+        SpfCheck { pass, temp_error }
+    }
+
+    #[test]
+    fn choose_verified_sender_prefers_valid_envelope_sender() {
+        let checks = SenderSpfChecks {
+            envelope: spf_check(true, false),
+            header: Some(spf_check(true, false)),
+        };
+
+        let sender = choose_verified_sender(
+            sender_candidate(Some("01012345678"), Some("KT")),
+            sender_candidate(Some("01087654321"), Some("LGU+")),
+            &checks,
+        )
+        .unwrap();
+
+        assert_eq!(sender.phone.as_deref(), Some("01012345678"));
+        assert_eq!(sender.carrier, "KT");
+    }
+
+    #[test]
+    fn choose_verified_sender_falls_back_to_header_sender() {
+        let checks = SenderSpfChecks {
+            envelope: spf_check(true, false),
+            header: Some(spf_check(true, false)),
+        };
+
+        let sender = choose_verified_sender(
+            sender_candidate(None, None),
+            sender_candidate(Some("01087654321"), Some("LGU+")),
+            &checks,
+        )
+        .unwrap();
+
+        assert_eq!(sender.phone.as_deref(), Some("01087654321"));
+        assert_eq!(sender.carrier, "LGU+");
+    }
+
+    #[test]
+    fn ensure_spf_accepted_maps_failures_to_smtp_replies() {
+        let temp_error = SenderSpfChecks {
+            envelope: spf_check(false, true),
+            header: Some(spf_check(false, false)),
+        };
+        assert_eq!(
+            ensure_spf_accepted(
+                &temp_error,
+                "127.0.0.1",
+                "mail@example.com",
+                "hdr@example.com"
+            )
+            .unwrap_err(),
+            SmtpReply::new(451, "SPF temperror", Some("4.7.0"))
+        );
+
+        let fail = SenderSpfChecks {
+            envelope: spf_check(false, false),
+            header: Some(spf_check(false, false)),
+        };
+        assert_eq!(
+            ensure_spf_accepted(&fail, "127.0.0.1", "mail@example.com", "hdr@example.com")
+                .unwrap_err(),
+            SmtpReply::new(550, "SPF fail", Some("5.7.1"))
+        );
     }
 
     #[tokio::test]
