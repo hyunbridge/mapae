@@ -31,6 +31,8 @@ struct ErrorResponse {
 const HTTP_READ_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
+const ERROR_INTERNAL_SERVER: &str = "Internal server error";
+const ERROR_INVALID_AUTH_ID: &str = "Invalid auth_id";
 
 /// 프론트엔드 및 백엔드 클라이언트가 접근하는 HTTP API 데몬을 실행합니다.
 ///
@@ -184,7 +186,6 @@ pub async fn run(
         }
     }
 
-    #[allow(unreachable_code)]
     Ok(())
 }
 
@@ -236,7 +237,7 @@ async fn auth_init_handler(auth: Arc<Service>) -> Result<impl Reply, Infallible>
         Err(e) => {
             error!("auth init error: {}", e);
             Ok(warp::reply::with_status(
-                warp::reply::json(&error_response("서버 오류가 발생했습니다")),
+                warp::reply::json(&error_response(ERROR_INTERNAL_SERVER)),
                 StatusCode::INTERNAL_SERVER_ERROR,
             ))
         }
@@ -247,7 +248,7 @@ async fn auth_check_handler(auth_id: String, auth: Arc<Service>) -> Result<impl 
     let auth_id = auth_id.trim();
     if auth_id.is_empty() {
         return Ok(warp::reply::with_status(
-            warp::reply::json(&error_response("유효하지 않은 auth_id 입니다")),
+            warp::reply::json(&error_response(ERROR_INVALID_AUTH_ID)),
             StatusCode::BAD_REQUEST,
         ));
     }
@@ -260,13 +261,13 @@ async fn auth_check_handler(auth_id: String, auth: Arc<Service>) -> Result<impl 
         Err(e) => {
             if matches!(e, AuthError::InvalidAuthId) {
                 Ok(warp::reply::with_status(
-                    warp::reply::json(&error_response("유효하지 않은 auth_id 입니다")),
+                    warp::reply::json(&error_response(ERROR_INVALID_AUTH_ID)),
                     StatusCode::BAD_REQUEST,
                 ))
             } else {
                 error!("auth check error: {}", e);
                 Ok(warp::reply::with_status(
-                    warp::reply::json(&error_response("서버 오류가 발생했습니다")),
+                    warp::reply::json(&error_response(ERROR_INTERNAL_SERVER)),
                     StatusCode::INTERNAL_SERVER_ERROR,
                 ))
             }
@@ -281,7 +282,7 @@ async fn auth_check_signed_handler(
     let auth_id = auth_id.trim();
     if auth_id.is_empty() {
         return Ok(warp::reply::with_status(
-            warp::reply::json(&error_response("유효하지 않은 auth_id 입니다")),
+            warp::reply::json(&error_response(ERROR_INVALID_AUTH_ID)),
             StatusCode::BAD_REQUEST,
         ));
     }
@@ -294,7 +295,7 @@ async fn auth_check_signed_handler(
         Err(e) => {
             if matches!(e, AuthError::InvalidAuthId) {
                 Ok(warp::reply::with_status(
-                    warp::reply::json(&error_response("유효하지 않은 auth_id 입니다")),
+                    warp::reply::json(&error_response(ERROR_INVALID_AUTH_ID)),
                     StatusCode::BAD_REQUEST,
                 ))
             } else if matches!(e, AuthError::JwksUnavailable) {
@@ -305,7 +306,7 @@ async fn auth_check_signed_handler(
             } else {
                 error!("auth result error: {}", e);
                 Ok(warp::reply::with_status(
-                    warp::reply::json(&error_response("서버 오류가 발생했습니다")),
+                    warp::reply::json(&error_response(ERROR_INTERNAL_SERVER)),
                     StatusCode::INTERNAL_SERVER_ERROR,
                 ))
             }
