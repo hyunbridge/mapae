@@ -6,7 +6,7 @@ use moka::{
     Expiry,
 };
 
-use super::{StorageError, Store, StoreFuture};
+use super::{StorageError, Store};
 
 #[derive(Clone)]
 struct Entry {
@@ -61,61 +61,55 @@ impl MemoryStore {
 }
 
 impl Store for MemoryStore {
-    fn ping(&self) -> StoreFuture<'_, ()> {
-        Box::pin(async { Ok(()) })
+    async fn ping(&self) -> Result<(), StorageError> {
+        Ok(())
     }
 
-    fn get<'a>(&'a self, key: &'a str) -> StoreFuture<'a, (String, bool)> {
-        Box::pin(async move {
-            match self.cache.get(key).filter(Entry::is_alive) {
-                Some(entry) => Ok((entry.value, true)),
-                None => Ok((String::new(), false)),
-            }
-        })
+    async fn get(&self, key: &str) -> Result<(String, bool), StorageError> {
+        match self.cache.get(key).filter(Entry::is_alive) {
+            Some(entry) => Ok((entry.value, true)),
+            None => Ok((String::new(), false)),
+        }
     }
 
-    fn take<'a>(&'a self, key: &'a str) -> StoreFuture<'a, (String, bool)> {
-        Box::pin(async move {
-            match self
-                .cache
-                .entry_by_ref(key)
-                .and_compute_with(|entry| match entry {
-                    Some(_) => Op::Remove,
-                    None => Op::Nop,
-                }) {
-                CompResult::Removed(entry) => {
-                    let entry = entry.into_value();
-                    if entry.is_alive() {
-                        Ok((entry.value, true))
-                    } else {
-                        Ok((String::new(), false))
-                    }
+    async fn take(&self, key: &str) -> Result<(String, bool), StorageError> {
+        match self
+            .cache
+            .entry_by_ref(key)
+            .and_compute_with(|entry| match entry {
+                Some(_) => Op::Remove,
+                None => Op::Nop,
+            }) {
+            CompResult::Removed(entry) => {
+                let entry = entry.into_value();
+                if entry.is_alive() {
+                    Ok((entry.value, true))
+                } else {
+                    Ok((String::new(), false))
                 }
-                _ => Ok((String::new(), false)),
             }
-        })
+            _ => Ok((String::new(), false)),
+        }
     }
 
-    fn set_ex<'a>(&'a self, key: &'a str, value: &'a str, ttl_seconds: u64) -> StoreFuture<'a, ()> {
-        Box::pin(async move {
-            if ttl_seconds == 0 {
-                return Err(StorageError::InvalidTtl);
-            }
-            let key = key.to_string();
-            let value = value.to_string();
-            let now = Instant::now();
-            let ttl = Duration::from_secs(ttl_seconds);
-            let expires_at = now.checked_add(ttl).ok_or(StorageError::InvalidTtl)?;
-            self.cache.insert(
-                key,
-                Entry {
-                    value,
-                    ttl,
-                    expires_at,
-                },
-            );
-            Ok(())
-        })
+    async fn set_ex(&self, key: &str, value: &str, ttl_seconds: u64) -> Result<(), StorageError> {
+        if ttl_seconds == 0 {
+            return Err(StorageError::InvalidTtl);
+        }
+        let key = key.to_string();
+        let value = value.to_string();
+        let now = Instant::now();
+        let ttl = Duration::from_secs(ttl_seconds);
+        let expires_at = now.checked_add(ttl).ok_or(StorageError::InvalidTtl)?;
+        self.cache.insert(
+            key,
+            Entry {
+                value,
+                ttl,
+                expires_at,
+            },
+        );
+        Ok(())
     }
 }
 

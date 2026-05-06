@@ -1,5 +1,5 @@
 use crate::config::Settings;
-use crate::storage::{StorageError, StoreBackend};
+use crate::storage::{StorageError, Store, StoreBackend};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -10,6 +10,8 @@ use super::jwt_signer::{JwtError, JwtSigner};
 const AUTH_ID_BYTES: usize = 16;
 const AUTH_ID_HEX_LENGTH: usize = AUTH_ID_BYTES * 2;
 const NONCE_BYTES: usize = 32;
+
+#[cfg(test)]
 const NONCE_HEX_LENGTH: usize = NONCE_BYTES * 2;
 
 /// 클라이언트가 인증 세션을 시작할 때 받는 응답.
