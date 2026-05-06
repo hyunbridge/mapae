@@ -1,6 +1,10 @@
 use std::time::{Duration, Instant};
 
-use moka::{sync::Cache, Expiry};
+use moka::{
+    ops::compute::{CompResult, Op},
+    sync::Cache,
+    Expiry,
+};
 
 use super::{StorageError, Store, StoreFuture};
 
@@ -72,10 +76,22 @@ impl Store for MemoryStore {
 
     fn take<'a>(&'a self, key: &'a str) -> StoreFuture<'a, (String, bool)> {
         Box::pin(async move {
-            match self.cache.remove(key) {
-                Some(entry) if entry.is_alive() => Ok((entry.value, true)),
-                Some(_) => Ok((String::new(), false)),
-                None => Ok((String::new(), false)),
+            match self
+                .cache
+                .entry_by_ref(key)
+                .and_compute_with(|entry| match entry {
+                    Some(_) => Op::Remove,
+                    None => Op::Nop,
+                }) {
+                CompResult::Removed(entry) => {
+                    let entry = entry.into_value();
+                    if entry.is_alive() {
+                        Ok((entry.value, true))
+                    } else {
+                        Ok((String::new(), false))
+                    }
+                }
+                _ => Ok((String::new(), false)),
             }
         })
     }
@@ -142,6 +158,26 @@ mod tests {
                 expires_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
             },
         );
+
+        let (_, ok) = store.get("expired").await.unwrap();
+        assert!(!ok);
+    }
+
+    #[tokio::test]
+    async fn test_take_expired_entry_does_not_succeed() {
+        let store = MemoryStore::new();
+        store.cache.insert(
+            "expired".to_string(),
+            Entry {
+                value: "v".to_string(),
+                ttl: Duration::from_secs(60),
+                expires_at: Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
+            },
+        );
+
+        let (value, ok) = store.take("expired").await.unwrap();
+        assert!(!ok);
+        assert!(value.is_empty());
 
         let (_, ok) = store.get("expired").await.unwrap();
         assert!(!ok);
