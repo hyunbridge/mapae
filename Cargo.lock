@@ -1153,7 +1153,6 @@ dependencies = [
  "moka",
  "percent-encoding",
  "pkcs8",
- "quoted_printable",
  "rand 0.8.6",
  "redis",
  "serde",

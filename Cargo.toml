@@ -38,7 +38,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 mailparse = "0.16"
 mail-auth = { version = "0.8", default-features = false, features = ["ring"] }
-quoted_printable = "0.5"
 moka = { version = "0.12", features = ["sync"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
 jsonwebtoken = { version = "10", features = ["use_pem", "ed25519-dalek", "rust_crypto"] }
