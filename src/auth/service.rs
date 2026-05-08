@@ -1,4 +1,5 @@
 use crate::config::Settings;
+use crate::metrics::METRICS;
 use crate::storage::{StorageError, Store, StoreBackend};
 use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde::{Deserialize, Serialize};
@@ -144,7 +145,8 @@ impl Service {
                 &auth_id,
                 self.settings.auth_ttl_seconds,
             )
-            .await?;
+            .await
+            .map_storage_error()?;
 
         let sms_body = format!("[MAPAE:{nonce}]");
         Ok(AuthInitResponse {
@@ -173,7 +175,7 @@ impl Service {
         }
 
         let key = format!("auth:{auth_id}");
-        let Some(value) = self.store.get(&key).await? else {
+        let Some(value) = self.store.get(&key).await.map_storage_error()? else {
             return Ok(auth_check_response(AuthStatus::Expired));
         };
 
@@ -185,7 +187,7 @@ impl Service {
 
     /// 설정된 저장소 백엔드가 응답하는지 확인합니다.
     pub async fn ping(&self) -> Result<(), AuthError> {
-        self.store.ping().await?;
+        self.store.ping().await.map_storage_error()?;
         Ok(())
     }
 
@@ -204,14 +206,14 @@ impl Service {
         };
         let payload_json = serde_json::to_string(&payload)?;
 
-        Ok(self
-            .store
+        self.store
             .consume_nonce_and_store_verified(
                 nonce,
                 &payload_json,
                 self.settings.verified_ttl_seconds,
             )
-            .await?)
+            .await
+            .map_storage_error()
     }
 
     /// 서명이 설정된 경우 검증된 인증 결과와 JWT를 함께 반환합니다.
@@ -303,6 +305,24 @@ fn now_rfc3339() -> String {
         time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
     now.format(&format)
         .unwrap_or_else(|_| now.unix_timestamp().to_string())
+}
+
+trait MapStorageError<T> {
+    fn map_storage_error(self) -> Result<T, AuthError>;
+}
+
+impl<T> MapStorageError<T> for Result<T, StorageError> {
+    fn map_storage_error(self) -> Result<T, AuthError> {
+        self.map_err(|err| {
+            if matches!(
+                err,
+                StorageError::Redis(_) | StorageError::InsufficientReplicas { .. }
+            ) {
+                METRICS.inc_redis_error();
+            }
+            AuthError::Storage(err)
+        })
+    }
 }
 
 #[cfg(test)]

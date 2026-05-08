@@ -17,6 +17,7 @@ use tracing::{error, info, warn};
 use super::{parser, DATA_SIZE_LIMIT_BYTES};
 use crate::auth::Service;
 use crate::config::Settings;
+use crate::metrics::METRICS;
 
 const APP_NAME: &str = "MAPAE";
 const SMTP_COMMAND_TIMEOUT: Duration = Duration::from_secs(300);
@@ -69,8 +70,10 @@ pub async fn run(
                     }
                 };
                 info!("New SMTP session from {}", peer_addr);
+                METRICS.inc_smtp_session();
 
                 let Ok(permit) = connection_limit.clone().try_acquire_owned() else {
+                    METRICS.inc_smtp_connection_limit_rejection();
                     warn!(
                         "Rejected SMTP session from {}: connection limit reached",
                         peer_addr
@@ -872,10 +875,12 @@ fn ensure_spf_accepted(
     header_from: &str,
 ) -> Result<(), SmtpReply> {
     if checks.any_pass() {
+        METRICS.inc_spf_pass();
         return Ok(());
     }
 
     if checks.has_temp_error() {
+        METRICS.inc_spf_tempfail();
         warn!(
             "SPF temperror: ip={} mail_from={} header_from={}",
             peer, mail_from, header_from
@@ -883,6 +888,7 @@ fn ensure_spf_accepted(
         return Err(SmtpReply::new(451, "SPF temperror", Some("4.7.0")));
     }
 
+    METRICS.inc_spf_fail();
     warn!(
         "SPF fail: ip={} mail_from={} header_from={}",
         peer, mail_from, header_from
@@ -923,10 +929,12 @@ async fn store_verification_by_nonce(
             SmtpReply::new(451, "Temporary server error", Some("4.3.0"))
         })?
     else {
+        METRICS.inc_nonce_not_found();
         warn!("Nonce not found or expired: {}", nonce);
         return Err(SmtpReply::new(550, "Invalid nonce", Some("5.7.1")));
     };
 
+    METRICS.inc_nonce_consumed();
     Ok(auth_id)
 }
 

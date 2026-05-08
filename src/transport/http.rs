@@ -16,11 +16,18 @@ use warp::{Filter, Reply};
 
 use crate::auth::{AuthError, Service};
 use crate::config::Settings;
+use crate::metrics::METRICS;
+use crate::runtime::RuntimeState;
 
 #[derive(Serialize)]
 struct HealthResponse {
     status: String,
     storage: String,
+}
+
+#[derive(Serialize)]
+struct StatusResponse {
+    status: String,
 }
 
 #[derive(Serialize)]
@@ -34,6 +41,7 @@ const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 const ERROR_INTERNAL_SERVER: &str = "Internal server error";
 const ERROR_INVALID_AUTH_ID: &str = "Invalid auth_id";
 const CORS_ALLOWED_HEADERS: [&str; 2] = ["authorization", "content-type"];
+const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
 /// 프론트엔드 및 백엔드 클라이언트가 접근하는 HTTP API 데몬을 실행합니다.
 ///
@@ -42,6 +50,7 @@ const CORS_ALLOWED_HEADERS: [&str; 2] = ["authorization", "content-type"];
 pub async fn run(
     config: Arc<Settings>,
     auth_service: Arc<Service>,
+    runtime_state: Arc<RuntimeState>,
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let cors_origins: Vec<String> = config.cors_allow_origins.clone();
@@ -50,12 +59,30 @@ pub async fn run(
         warn!("HTTP CORS allows any origin; set CORS_ALLOW_ORIGINS for production deployments");
     }
     let auth_filter = with_auth(auth_service);
+    let runtime_filter = with_runtime_state(runtime_state);
 
     let health = warp::path("health")
         .and(warp::path::end())
         .and(warp::get())
         .and(auth_filter.clone())
         .and_then(health_handler);
+
+    let live = warp::path("live")
+        .and(warp::path::end())
+        .and(warp::get())
+        .and_then(live_handler);
+
+    let ready = warp::path("ready")
+        .and(warp::path::end())
+        .and(warp::get())
+        .and(auth_filter.clone())
+        .and(runtime_filter)
+        .and_then(ready_handler);
+
+    let metrics = warp::path("metrics")
+        .and(warp::path::end())
+        .and(warp::get())
+        .and_then(metrics_handler);
 
     let auth_init = warp::path("auth")
         .and(warp::path("init"))
@@ -88,6 +115,9 @@ pub async fn run(
         .and_then(jwks_handler);
 
     let routes = health
+        .or(live)
+        .or(ready)
+        .or(metrics)
         .or(auth_init)
         .or(auth_check)
         .or(auth_check_signed)
@@ -131,6 +161,7 @@ pub async fn run(
                 };
 
                 let Ok(permit) = connection_limit.clone().try_acquire_owned() else {
+                    METRICS.inc_http_connection_limit_rejection();
                     warn!(
                         "Rejected HTTP connection from {}: connection limit reached",
                         peer
@@ -218,6 +249,12 @@ fn with_auth(
     warp::any().map(move || auth.clone())
 }
 
+fn with_runtime_state(
+    state: Arc<RuntimeState>,
+) -> impl Filter<Extract = (Arc<RuntimeState>,), Error = Infallible> + Clone {
+    warp::any().map(move || state.clone())
+}
+
 async fn health_handler(auth: Arc<Service>) -> Result<impl Reply, Infallible> {
     match auth.ping().await {
         Ok(()) => Ok(warp::reply::with_status(
@@ -237,7 +274,35 @@ async fn health_handler(auth: Arc<Service>) -> Result<impl Reply, Infallible> {
     }
 }
 
+async fn live_handler() -> Result<impl Reply, Infallible> {
+    Ok(warp::reply::with_status(
+        warp::reply::json(&StatusResponse {
+            status: "ok".to_string(),
+        }),
+        StatusCode::OK,
+    ))
+}
+
+async fn ready_handler(
+    auth: Arc<Service>,
+    runtime_state: Arc<RuntimeState>,
+) -> Result<impl Reply, Infallible> {
+    let storage_up = auth.ping().await.is_ok();
+    let (status, body) = readiness_response(storage_up, runtime_state.is_draining());
+
+    Ok(warp::reply::with_status(warp::reply::json(&body), status))
+}
+
+async fn metrics_handler() -> Result<impl Reply, Infallible> {
+    Ok(response_with_text_body(
+        StatusCode::OK,
+        METRICS.render_prometheus().into_bytes(),
+        PROMETHEUS_CONTENT_TYPE,
+    ))
+}
+
 async fn auth_init_handler(auth: Arc<Service>) -> Result<impl Reply, Infallible> {
+    METRICS.inc_auth_init();
     match auth.init_auth().await {
         Ok(resp) => Ok(warp::reply::with_status(
             warp::reply::json(&resp),
@@ -254,6 +319,7 @@ async fn auth_init_handler(auth: Arc<Service>) -> Result<impl Reply, Infallible>
 }
 
 async fn auth_check_handler(auth_id: String, auth: Arc<Service>) -> Result<impl Reply, Infallible> {
+    METRICS.inc_auth_check();
     let auth_id = auth_id.trim();
     if auth_id.is_empty() {
         return Ok(warp::reply::with_status(
@@ -288,6 +354,7 @@ async fn auth_check_signed_handler(
     auth_id: String,
     auth: Arc<Service>,
 ) -> Result<impl Reply, Infallible> {
+    METRICS.inc_auth_check_signed();
     let auth_id = auth_id.trim();
     if auth_id.is_empty() {
         return Ok(warp::reply::with_status(
@@ -342,12 +409,50 @@ async fn jwks_handler(auth: Arc<Service>) -> Result<impl Reply, Infallible> {
 }
 
 fn response_with_json_body(status: StatusCode, body: Vec<u8>) -> warp::http::Response<Vec<u8>> {
+    response_with_text_body(status, body, "application/json")
+}
+
+fn response_with_text_body(
+    status: StatusCode,
+    body: Vec<u8>,
+    content_type: &'static str,
+) -> warp::http::Response<Vec<u8>> {
     let mut response = warp::http::Response::new(body);
     *response.status_mut() = status;
     response
         .headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     response
+}
+
+fn readiness_response(storage_up: bool, draining: bool) -> (StatusCode, HealthResponse) {
+    if draining {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            HealthResponse {
+                status: "draining".to_string(),
+                storage: if storage_up { "up" } else { "down" }.to_string(),
+            },
+        );
+    }
+
+    if storage_up {
+        (
+            StatusCode::OK,
+            HealthResponse {
+                status: "ok".to_string(),
+                storage: "up".to_string(),
+            },
+        )
+    } else {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            HealthResponse {
+                status: "unhealthy".to_string(),
+                storage: "down".to_string(),
+            },
+        )
+    }
 }
 
 fn error_response(detail: &str) -> ErrorResponse {
@@ -358,7 +463,12 @@ fn error_response(detail: &str) -> ErrorResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{allows_any_cors_origin, build_cors};
+    use super::{
+        allows_any_cors_origin, build_cors, readiness_response, response_with_text_body,
+        PROMETHEUS_CONTENT_TYPE,
+    };
+    use warp::http::header::CONTENT_TYPE;
+    use warp::http::StatusCode;
 
     #[test]
     fn cors_origin_wildcard_is_explicit() {
@@ -373,5 +483,40 @@ mod tests {
     fn cors_filter_builds_for_wildcard_and_explicit_origins() {
         let _ = build_cors(&["*".to_string()]);
         let _ = build_cors(&["https://example.com".to_string()]);
+    }
+
+    #[test]
+    fn ready_response_requires_storage_up_and_not_draining() {
+        let (status, body) = readiness_response(true, false);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.status, "ok");
+        assert_eq!(body.storage, "up");
+
+        let (status, body) = readiness_response(false, false);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "unhealthy");
+        assert_eq!(body.storage, "down");
+
+        let (status, body) = readiness_response(true, true);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "draining");
+        assert_eq!(body.storage, "up");
+    }
+
+    #[test]
+    fn metrics_response_uses_prometheus_content_type() {
+        let response = response_with_text_body(
+            StatusCode::OK,
+            b"mapae_auth_init_total 0\n".to_vec(),
+            PROMETHEUS_CONTENT_TYPE,
+        );
+
+        assert_eq!(
+            response.headers().get(CONTENT_TYPE).unwrap(),
+            PROMETHEUS_CONTENT_TYPE
+        );
+        assert!(String::from_utf8(response.into_body())
+            .unwrap()
+            .contains("mapae_auth_init_total"));
     }
 }

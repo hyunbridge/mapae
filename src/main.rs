@@ -1,6 +1,8 @@
 mod auth;
 mod config;
 mod logging;
+mod metrics;
+mod runtime;
 mod storage;
 mod transport;
 
@@ -80,6 +82,7 @@ async fn main() -> anyhow::Result<()> {
     let auth_service = Arc::new(
         auth::Service::new(store, &settings).context("Failed to initialize auth service")?,
     );
+    let runtime_state = Arc::new(runtime::RuntimeState::new());
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let mut server_tasks = JoinSet::new();
@@ -99,10 +102,11 @@ async fn main() -> anyhow::Result<()> {
     if settings.server_mode.runs_http() {
         let http_config = settings.clone();
         let http_auth = auth_service.clone();
+        let http_runtime_state = runtime_state.clone();
         server_tasks.spawn(async move {
             (
                 "HTTP",
-                transport::http::run(http_config, http_auth, shutdown_rx).await,
+                transport::http::run(http_config, http_auth, http_runtime_state, shutdown_rx).await,
             )
         });
     }
@@ -110,6 +114,7 @@ async fn main() -> anyhow::Result<()> {
     let result = tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!("Shutting down...");
+            runtime_state.begin_draining();
             request_shutdown(&shutdown_tx);
             wait_or_abort_all(&mut server_tasks).await;
             Ok(())
@@ -119,6 +124,7 @@ async fn main() -> anyhow::Result<()> {
                 || Ok(()),
                 task_result,
             );
+            runtime_state.begin_draining();
             request_shutdown(&shutdown_tx);
             wait_or_abort_all(&mut server_tasks).await;
             result
