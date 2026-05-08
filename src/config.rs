@@ -2,6 +2,24 @@ use std::str::FromStr;
 
 use serde::Deserialize;
 
+/// 런타임에서 실행할 서버 조합.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServerMode {
+    All,
+    Http,
+    Smtp,
+}
+
+impl ServerMode {
+    pub fn runs_http(self) -> bool {
+        matches!(self, Self::All | Self::Http)
+    }
+
+    pub fn runs_smtp(self) -> bool {
+        matches!(self, Self::All | Self::Smtp)
+    }
+}
+
 /// 환경변수에서 읽어오는 런타임 설정.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -9,6 +27,9 @@ pub struct Settings {
     /// `RUST_LOG`가 없을 때 debug 레벨 로그를 활성화합니다.
     #[serde(deserialize_with = "deserialize_bool_or_default")]
     pub debug: bool,
+    /// 실행할 서버 조합.
+    #[serde(deserialize_with = "deserialize_server_mode")]
+    pub server_mode: ServerMode,
     /// Redis 대신 프로세스 로컬 메모리 저장소를 사용합니다.
     #[serde(deserialize_with = "deserialize_bool_or_default")]
     pub use_in_memory_store: bool,
@@ -82,6 +103,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             debug: false,
+            server_mode: ServerMode::All,
             use_in_memory_store: false,
             redis_url: String::new(),
             redis_wait_replicas: 0,
@@ -116,6 +138,22 @@ where
         "1" | "true" | "yes" | "on" => true,
         "0" | "false" | "no" | "off" => false,
         _ => false,
+    })
+}
+
+fn deserialize_server_mode<'de, D>(deserializer: D) -> Result<ServerMode, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let Some(value) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(Settings::default().server_mode);
+    };
+
+    Ok(match value.trim().to_ascii_lowercase().as_str() {
+        "all" => ServerMode::All,
+        "http" => ServerMode::Http,
+        "smtp" => ServerMode::Smtp,
+        _ => ServerMode::All,
     })
 }
 
@@ -253,6 +291,22 @@ mod tests {
     }
 
     #[test]
+    fn test_env_server_mode() {
+        assert_eq!(
+            settings_from_env(&[("SERVER_MODE", "http")]).server_mode,
+            ServerMode::Http
+        );
+        assert_eq!(
+            settings_from_env(&[("SERVER_MODE", "SMTP")]).server_mode,
+            ServerMode::Smtp
+        );
+        assert_eq!(
+            settings_from_env(&[("SERVER_MODE", "invalid")]).server_mode,
+            ServerMode::All
+        );
+    }
+
+    #[test]
     fn test_env_numbers() {
         let settings = settings_from_env(&[
             ("SMTP_PORT", "2526"),
@@ -301,6 +355,7 @@ mod tests {
     fn test_load_defaults() {
         for var in &[
             "DEBUG",
+            "SERVER_MODE",
             "USE_IN_MEMORY_STORE",
             "REDIS_URL",
             "REDIS_WAIT_REPLICAS",
@@ -324,6 +379,7 @@ mod tests {
         }
         let s = Settings::load();
         assert!(!s.debug);
+        assert_eq!(s.server_mode, ServerMode::All);
         assert!(!s.use_in_memory_store);
         assert!(s.redis_url.is_empty());
         assert_eq!(s.redis_wait_replicas, 0);

@@ -39,6 +39,7 @@ MAPAE는 SMTP 서버와 HTTP API를 동시에 제공합니다.
 | 변수명 | 기본값 | 설명 |
 | :--- | :--- | :--- |
 | `DEBUG` | `false` | 디버그 로깅 활성화 |
+| `SERVER_MODE` | `all` | 실행할 서버 조합 (`all`, `http`, `smtp`) |
 
 ### 저장소
 

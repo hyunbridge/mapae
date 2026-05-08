@@ -8,44 +8,48 @@ use anyhow::Context;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::watch;
-use tokio::task::{JoinError, JoinHandle};
-use tokio::time::timeout;
+use tokio::task::{JoinError, JoinSet};
 use tracing::{error, info};
 
 const SHUTDOWN_GRACE_PERIOD: Duration = Duration::from_secs(5);
+type ServerTaskResult = (&'static str, anyhow::Result<()>);
 
 fn request_shutdown(shutdown_tx: &watch::Sender<bool>) {
     let _ = shutdown_tx.send(true);
 }
 
-async fn wait_or_abort(mut task: JoinHandle<anyhow::Result<()>>) {
-    if timeout(SHUTDOWN_GRACE_PERIOD, &mut task).await.is_err() {
-        task.abort();
-        let _ = task.await;
+async fn wait_or_abort_all(tasks: &mut JoinSet<ServerTaskResult>) {
+    let deadline = tokio::time::sleep(SHUTDOWN_GRACE_PERIOD);
+    tokio::pin!(deadline);
+
+    loop {
+        tokio::select! {
+            result = tasks.join_next(), if !tasks.is_empty() => {
+                if let Some(result) = result {
+                    let _ = task_result(result);
+                }
+            }
+            _ = &mut deadline, if !tasks.is_empty() => {
+                tasks.abort_all();
+                while tasks.join_next().await.is_some() {}
+                break;
+            }
+            else => break,
+        }
     }
 }
 
-async fn wait_or_abort_all(
-    smtp_task: JoinHandle<anyhow::Result<()>>,
-    http_task: JoinHandle<anyhow::Result<()>>,
-) {
-    tokio::join!(wait_or_abort(smtp_task), wait_or_abort(http_task));
-}
-
-fn task_result(
-    name: &'static str,
-    result: Result<anyhow::Result<()>, JoinError>,
-) -> anyhow::Result<()> {
+fn task_result(result: Result<ServerTaskResult, JoinError>) -> anyhow::Result<()> {
     match result {
-        Ok(Ok(())) => {
+        Ok((name, Ok(()))) => {
             info!("{} server stopped", name);
             Ok(())
         }
-        Ok(Err(err)) => {
+        Ok((name, Err(err))) => {
             error!("{} server error: {}", name, err);
             Err(err).with_context(|| format!("{name} server stopped"))
         }
-        Err(err) => Err(err).with_context(|| format!("{name} task failed")),
+        Err(err) => Err(err).context("server task failed"),
     }
 }
 
@@ -77,36 +81,46 @@ async fn main() -> anyhow::Result<()> {
         auth::Service::new(store, &settings).context("Failed to initialize auth service")?,
     );
 
-    let smtp_config = settings.clone();
-    let http_config = settings.clone();
-    let smtp_auth = auth_service.clone();
-    let http_auth = auth_service.clone();
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut server_tasks = JoinSet::new();
 
-    let mut smtp_task = tokio::spawn(transport::smtp::run(
-        smtp_config,
-        smtp_auth,
-        shutdown_rx.clone(),
-    ));
-    let mut http_task = tokio::spawn(transport::http::run(http_config, http_auth, shutdown_rx));
+    if settings.server_mode.runs_smtp() {
+        let smtp_config = settings.clone();
+        let smtp_auth = auth_service.clone();
+        let smtp_shutdown = shutdown_rx.clone();
+        server_tasks.spawn(async move {
+            (
+                "SMTP",
+                transport::smtp::run(smtp_config, smtp_auth, smtp_shutdown).await,
+            )
+        });
+    }
+
+    if settings.server_mode.runs_http() {
+        let http_config = settings.clone();
+        let http_auth = auth_service.clone();
+        server_tasks.spawn(async move {
+            (
+                "HTTP",
+                transport::http::run(http_config, http_auth, shutdown_rx).await,
+            )
+        });
+    }
 
     let result = tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             info!("Shutting down...");
             request_shutdown(&shutdown_tx);
-            wait_or_abort_all(smtp_task, http_task).await;
+            wait_or_abort_all(&mut server_tasks).await;
             Ok(())
         }
-        result = &mut smtp_task => {
-            let result = task_result("SMTP", result);
+        result = server_tasks.join_next() => {
+            let result = result.map_or_else(
+                || Ok(()),
+                task_result,
+            );
             request_shutdown(&shutdown_tx);
-            wait_or_abort(http_task).await;
-            result
-        },
-        result = &mut http_task => {
-            let result = task_result("HTTP", result);
-            request_shutdown(&shutdown_tx);
-            wait_or_abort(smtp_task).await;
+            wait_or_abort_all(&mut server_tasks).await;
             result
         },
     };
