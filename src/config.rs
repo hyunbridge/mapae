@@ -30,6 +30,9 @@ pub struct Settings {
     /// 실행할 서버 조합.
     #[serde(deserialize_with = "deserialize_server_mode")]
     pub server_mode: ServerMode,
+    /// 종료 요청 후 readiness를 내리고 accept loop를 멈추기 전까지 기다릴 시간.
+    #[serde(deserialize_with = "deserialize_shutdown_drain_seconds")]
+    pub shutdown_drain_seconds: u64,
     /// Redis 대신 프로세스 로컬 메모리 저장소를 사용합니다.
     #[serde(deserialize_with = "deserialize_bool_or_default")]
     pub use_in_memory_store: bool,
@@ -104,6 +107,7 @@ impl Default for Settings {
         Self {
             debug: false,
             server_mode: ServerMode::All,
+            shutdown_drain_seconds: 5,
             use_in_memory_store: false,
             redis_url: String::new(),
             redis_wait_replicas: 0,
@@ -162,6 +166,13 @@ where
     D: serde::Deserializer<'de>,
 {
     deserialize_from_str_or_default(deserializer, || Settings::default().smtp_port)
+}
+
+fn deserialize_shutdown_drain_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_from_str_or_default(deserializer, || Settings::default().shutdown_drain_seconds)
 }
 
 fn deserialize_smtp_max_connections<'de, D>(deserializer: D) -> Result<usize, D::Error>
@@ -315,6 +326,7 @@ mod tests {
             ("HTTP_MAX_CONNECTIONS", "not-a-number"),
             ("REDIS_WAIT_REPLICAS", "2"),
             ("REDIS_WAIT_TIMEOUT_MS", "1500"),
+            ("SHUTDOWN_DRAIN_SECONDS", "7"),
         ]);
 
         assert_eq!(settings.smtp_port, 2526);
@@ -323,6 +335,7 @@ mod tests {
         assert_eq!(settings.http_max_connections, 1024);
         assert_eq!(settings.redis_wait_replicas, 2);
         assert_eq!(settings.redis_wait_timeout_ms, 1500);
+        assert_eq!(settings.shutdown_drain_seconds, 7);
     }
 
     #[test]
@@ -356,6 +369,7 @@ mod tests {
         for var in &[
             "DEBUG",
             "SERVER_MODE",
+            "SHUTDOWN_DRAIN_SECONDS",
             "USE_IN_MEMORY_STORE",
             "REDIS_URL",
             "REDIS_WAIT_REPLICAS",
@@ -380,6 +394,7 @@ mod tests {
         let s = Settings::load();
         assert!(!s.debug);
         assert_eq!(s.server_mode, ServerMode::All);
+        assert_eq!(s.shutdown_drain_seconds, 5);
         assert!(!s.use_in_memory_store);
         assert!(s.redis_url.is_empty());
         assert_eq!(s.redis_wait_replicas, 0);

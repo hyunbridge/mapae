@@ -20,6 +20,39 @@ fn request_shutdown(shutdown_tx: &watch::Sender<bool>) {
     let _ = shutdown_tx.send(true);
 }
 
+async fn drain_then_request_shutdown(
+    runtime_state: &runtime::RuntimeState,
+    shutdown_tx: &watch::Sender<bool>,
+    drain: Duration,
+) {
+    runtime_state.begin_draining();
+    if !drain.is_zero() {
+        tokio::time::sleep(drain).await;
+    }
+    request_shutdown(shutdown_tx);
+}
+
+async fn shutdown_signal() -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .context("install SIGTERM handler")?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result.context("install SIGINT handler")?,
+            _ = sigterm.recv() => {},
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c()
+            .await
+            .context("install SIGINT handler")?;
+        Ok(())
+    }
+}
+
 async fn wait_or_abort_all(tasks: &mut JoinSet<ServerTaskResult>) {
     let deadline = tokio::time::sleep(SHUTDOWN_GRACE_PERIOD);
     tokio::pin!(deadline);
@@ -112,10 +145,14 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let result = tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
+        signal = shutdown_signal() => {
+            signal?;
             info!("Shutting down...");
-            runtime_state.begin_draining();
-            request_shutdown(&shutdown_tx);
+            drain_then_request_shutdown(
+                &runtime_state,
+                &shutdown_tx,
+                Duration::from_secs(settings.shutdown_drain_seconds),
+            ).await;
             wait_or_abort_all(&mut server_tasks).await;
             Ok(())
         }
