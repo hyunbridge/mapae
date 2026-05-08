@@ -1,5 +1,8 @@
+use std::fmt::Display;
 use std::str::FromStr;
 
+use anyhow::bail;
+use serde::de::Error as _;
 use serde::Deserialize;
 
 /// 런타임에서 실행할 서버 조합.
@@ -90,19 +93,40 @@ pub struct Settings {
 
 impl Settings {
     /// 환경변수를 읽고 비어 있는 값은 기본값으로 채웁니다.
-    pub fn load() -> Self {
-        envy::from_env::<Self>()
-            .unwrap_or_else(|err| {
-                eprintln!("warning: ignoring invalid environment configuration: {err}");
-                Self::default()
-            })
-            .normalized()
+    pub fn load() -> anyhow::Result<Self> {
+        envy::from_env::<Self>()?.normalized()
     }
 
-    fn normalized(mut self) -> Self {
-        self.smtp_max_connections = self.smtp_max_connections.max(1);
-        self.http_max_connections = self.http_max_connections.max(1);
-        self
+    fn normalized(mut self) -> anyhow::Result<Self> {
+        self.redis_url = self.redis_url.trim().to_string();
+        self.smtp_host = self.smtp_host.trim().to_string();
+        self.sms_inbound_address = self.sms_inbound_address.trim().to_string();
+        self.http_host = self.http_host.trim().to_string();
+        self.jwt_key_id = self.jwt_key_id.trim().to_string();
+        self.jwt_extra_jwks_keys = self.jwt_extra_jwks_keys.trim().to_string();
+        self.jwt_issuer = self.jwt_issuer.trim().to_string();
+        self.cors_allow_origins = normalize_cors_allow_origins(self.cors_allow_origins);
+        if self.smtp_max_connections == 0 {
+            bail!("SMTP_MAX_CONNECTIONS must be greater than 0");
+        }
+        if self.http_max_connections == 0 {
+            bail!("HTTP_MAX_CONNECTIONS must be greater than 0");
+        }
+
+        if self.auth_ttl_seconds == 0 {
+            bail!("AUTH_TTL_SECONDS must be greater than 0");
+        }
+        if self.verified_ttl_seconds == 0 {
+            bail!("VERIFIED_TTL_SECONDS must be greater than 0");
+        }
+        if self.jwt_ttl_seconds == 0 {
+            bail!("JWT_TTL_SECONDS must be greater than 0");
+        }
+        if self.redis_wait_replicas > 0 && self.redis_wait_timeout_ms == 0 {
+            bail!("REDIS_WAIT_TIMEOUT_MS must be greater than 0 when REDIS_WAIT_REPLICAS is set");
+        }
+
+        Ok(self)
     }
 }
 
@@ -144,11 +168,16 @@ where
         return Ok(false);
     };
 
-    Ok(match value.trim().to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => true,
-        "0" | "false" | "no" | "off" => false,
-        _ => false,
-    })
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(false);
+    }
+
+    match trimmed.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(D::Error::custom(format!("invalid boolean value: {value}"))),
+    }
 }
 
 fn deserialize_server_mode<'de, D>(deserializer: D) -> Result<ServerMode, D::Error>
@@ -159,95 +188,107 @@ where
         return Ok(Settings::default().server_mode);
     };
 
-    Ok(match value.trim().to_ascii_lowercase().as_str() {
-        "all" => ServerMode::All,
-        "http" => ServerMode::Http,
-        "smtp" => ServerMode::Smtp,
-        _ => ServerMode::All,
-    })
+    match value.trim().to_ascii_lowercase().as_str() {
+        "all" => Ok(ServerMode::All),
+        "http" => Ok(ServerMode::Http),
+        "smtp" => Ok(ServerMode::Smtp),
+        _ => Err(D::Error::custom(format!("invalid server mode: {value}"))),
+    }
 }
 
 fn deserialize_smtp_port<'de, D>(deserializer: D) -> Result<u16, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_from_str_or_default(deserializer, || Settings::default().smtp_port)
+    deserialize_from_str_or_missing(deserializer, || Settings::default().smtp_port)
 }
 
 fn deserialize_shutdown_drain_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_from_str_or_default(deserializer, || Settings::default().shutdown_drain_seconds)
+    deserialize_from_str_or_missing(deserializer, || Settings::default().shutdown_drain_seconds)
 }
 
 fn deserialize_smtp_max_connections<'de, D>(deserializer: D) -> Result<usize, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_from_str_or_default(deserializer, || Settings::default().smtp_max_connections)
+    deserialize_from_str_or_missing(deserializer, || Settings::default().smtp_max_connections)
 }
 
 fn deserialize_http_port<'de, D>(deserializer: D) -> Result<u16, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_from_str_or_default(deserializer, || Settings::default().http_port)
+    deserialize_from_str_or_missing(deserializer, || Settings::default().http_port)
 }
 
 fn deserialize_http_max_connections<'de, D>(deserializer: D) -> Result<usize, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_from_str_or_default(deserializer, || Settings::default().http_max_connections)
+    deserialize_from_str_or_missing(deserializer, || Settings::default().http_max_connections)
 }
 
 fn deserialize_redis_wait_replicas<'de, D>(deserializer: D) -> Result<usize, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_from_str_or_default(deserializer, || Settings::default().redis_wait_replicas)
+    deserialize_from_str_or_missing(deserializer, || Settings::default().redis_wait_replicas)
 }
 
 fn deserialize_redis_wait_timeout_ms<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_from_str_or_default(deserializer, || Settings::default().redis_wait_timeout_ms)
+    deserialize_from_str_or_missing(deserializer, || Settings::default().redis_wait_timeout_ms)
 }
 
 fn deserialize_auth_ttl_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_from_str_or_default(deserializer, || Settings::default().auth_ttl_seconds)
+    deserialize_from_str_or_missing(deserializer, || Settings::default().auth_ttl_seconds)
 }
 
 fn deserialize_verified_ttl_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_from_str_or_default(deserializer, || Settings::default().verified_ttl_seconds)
+    deserialize_from_str_or_missing(deserializer, || Settings::default().verified_ttl_seconds)
 }
 
 fn deserialize_jwt_ttl_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_from_str_or_default(deserializer, || Settings::default().jwt_ttl_seconds)
+    deserialize_from_str_or_missing(deserializer, || Settings::default().jwt_ttl_seconds)
 }
 
-fn deserialize_from_str_or_default<'de, D, T>(
+fn deserialize_from_str_or_missing<'de, D, T>(
     deserializer: D,
     default: impl FnOnce() -> T,
 ) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: FromStr,
+    T::Err: Display,
 {
-    Ok(Option::<String>::deserialize(deserializer)?
-        .and_then(|value| value.trim().parse::<T>().ok())
-        .unwrap_or_else(default))
+    let Some(value) = Option::<String>::deserialize(deserializer)? else {
+        return Ok(default());
+    };
+
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(default());
+    }
+
+    trimmed.parse::<T>().map_err(|err| {
+        D::Error::custom(format!(
+            "invalid value for environment variable: {trimmed}: {err}"
+        ))
+    })
 }
 
 fn deserialize_cors_allow_origins<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -264,10 +305,9 @@ where
     }
 
     if trimmed.starts_with('[') {
-        return Ok(serde_json::from_str::<Vec<String>>(trimmed)
-            .ok()
-            .filter(|parsed| !parsed.is_empty())
-            .unwrap_or_else(|| Settings::default().cors_allow_origins));
+        let parsed = serde_json::from_str::<Vec<String>>(trimmed)
+            .map_err(|err| D::Error::custom(format!("invalid CORS_ALLOW_ORIGINS JSON: {err}")))?;
+        return Ok(parsed);
     }
 
     let out: Vec<String> = trimmed
@@ -282,19 +322,36 @@ where
     }
 }
 
+fn normalize_cors_allow_origins(origins: Vec<String>) -> Vec<String> {
+    let mut normalized: Vec<String> = origins
+        .into_iter()
+        .map(|origin| origin.trim().to_string())
+        .filter(|origin| !origin.is_empty())
+        .collect();
+
+    if normalized.is_empty() {
+        normalized = Settings::default().cors_allow_origins;
+    }
+
+    normalized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::env;
 
-    fn settings_from_env(values: &[(&str, &str)]) -> Settings {
+    fn settings_result_from_env(values: &[(&str, &str)]) -> anyhow::Result<Settings> {
         envy::from_iter::<_, Settings>(
             values
                 .iter()
                 .map(|(key, value)| (key.to_string(), value.to_string())),
-        )
-        .unwrap()
+        )?
         .normalized()
+    }
+
+    fn settings_from_env(values: &[(&str, &str)]) -> Settings {
+        settings_result_from_env(values).unwrap()
     }
 
     #[test]
@@ -302,9 +359,10 @@ mod tests {
         assert!(settings_from_env(&[("DEBUG", "yes")]).debug);
         assert!(!settings_from_env(&[("DEBUG", "off")]).debug);
 
-        let settings = settings_from_env(&[("DEBUG", "unknown"), ("DUMP_INBOUND", "TRUE")]);
-        assert!(!settings.debug);
-        assert!(settings.dump_inbound);
+        assert!(
+            envy::from_iter::<_, Settings>(vec![("DEBUG".to_string(), "unknown".to_string())])
+                .is_err()
+        );
     }
 
     #[test]
@@ -317,10 +375,11 @@ mod tests {
             settings_from_env(&[("SERVER_MODE", "SMTP")]).server_mode,
             ServerMode::Smtp
         );
-        assert_eq!(
-            settings_from_env(&[("SERVER_MODE", "invalid")]).server_mode,
-            ServerMode::All
-        );
+        assert!(envy::from_iter::<_, Settings>(vec![(
+            "SERVER_MODE".to_string(),
+            "invalid".to_string()
+        )])
+        .is_err());
     }
 
     #[test]
@@ -328,8 +387,8 @@ mod tests {
         let settings = settings_from_env(&[
             ("SMTP_PORT", "2526"),
             ("HTTP_PORT", " 9000 "),
-            ("SMTP_MAX_CONNECTIONS", "0"),
-            ("HTTP_MAX_CONNECTIONS", "not-a-number"),
+            ("SMTP_MAX_CONNECTIONS", "512"),
+            ("HTTP_MAX_CONNECTIONS", "2048"),
             ("REDIS_WAIT_REPLICAS", "2"),
             ("REDIS_WAIT_TIMEOUT_MS", "1500"),
             ("SHUTDOWN_DRAIN_SECONDS", "7"),
@@ -337,11 +396,26 @@ mod tests {
 
         assert_eq!(settings.smtp_port, 2526);
         assert_eq!(settings.http_port, 9000);
-        assert_eq!(settings.smtp_max_connections, 1);
-        assert_eq!(settings.http_max_connections, 1024);
+        assert_eq!(settings.smtp_max_connections, 512);
+        assert_eq!(settings.http_max_connections, 2048);
         assert_eq!(settings.redis_wait_replicas, 2);
         assert_eq!(settings.redis_wait_timeout_ms, 1500);
         assert_eq!(settings.shutdown_drain_seconds, 7);
+
+        assert!(envy::from_iter::<_, Settings>(vec![(
+            "HTTP_MAX_CONNECTIONS".to_string(),
+            "not-a-number".to_string()
+        )])
+        .is_err());
+
+        assert!(settings_result_from_env(&[("SMTP_MAX_CONNECTIONS", "0")]).is_err());
+        assert!(settings_result_from_env(&[("HTTP_MAX_CONNECTIONS", "0")]).is_err());
+        assert!(settings_result_from_env(&[
+            ("REDIS_WAIT_REPLICAS", "1"),
+            ("REDIS_WAIT_TIMEOUT_MS", "0")
+        ])
+        .is_err());
+        assert!(settings_result_from_env(&[("JWT_TTL_SECONDS", "0")]).is_err());
     }
 
     #[test]
@@ -354,7 +428,7 @@ mod tests {
         assert_eq!(
             settings_from_env(&[(
                 "CORS_ALLOW_ORIGINS",
-                r#"["https://a.example","https://b.example"]"#
+                r#"["https://a.example"," https://b.example "]"#
             )])
             .cors_allow_origins,
             vec!["https://a.example", "https://b.example"]
@@ -399,7 +473,7 @@ mod tests {
         ] {
             env::remove_var(var);
         }
-        let s = Settings::load();
+        let s = Settings::load().unwrap();
         assert!(!s.debug);
         assert_eq!(s.server_mode, ServerMode::All);
         assert_eq!(s.shutdown_drain_seconds, 5);

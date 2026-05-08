@@ -42,6 +42,8 @@ MAPAE는 SMTP 서버와 HTTP API를 동시에 제공합니다.
 | `SERVER_MODE` | `all` | 실행할 서버 조합 (`all`, `http`, `smtp`) |
 | `SHUTDOWN_DRAIN_SECONDS` | `5` | 종료 요청 후 readiness를 내리고 accept loop를 멈추기 전까지 기다릴 시간 |
 
+환경변수 값이 잘못되면 서버는 기본값으로 조용히 되돌아가지 않고 시작 단계에서 실패합니다.
+
 ### 저장소
 
 | 변수명 | 기본값 | 설명 |

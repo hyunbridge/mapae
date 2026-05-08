@@ -90,7 +90,7 @@ fn task_result(result: Result<ServerTaskResult, JoinError>) -> anyhow::Result<()
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let settings = Arc::new(config::Settings::load());
+    let settings = Arc::new(config::Settings::load().context("invalid environment configuration")?);
     logging::init(settings.debug);
 
     let store = if settings.use_in_memory_store {
