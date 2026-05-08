@@ -114,6 +114,51 @@ docker run --rm --name mapae \
   mapae:latest
 ```
 
+### Stateless 스케일 아웃
+
+운영 환경에서는 `USE_IN_MEMORY_STORE=false`로 Redis를 공유 저장소로 사용합니다. 애플리케이션 인스턴스는 인증 상태를 로컬 메모리에 보관하지 않으므로 HTTP와 SMTP를 sticky session 없이 수평 확장할 수 있습니다.
+
+#### 권장 토폴로지
+
+- HTTP API: `SERVER_MODE=http` 컨테이너 N개를 L7 Load Balancer 뒤에 둡니다. LB health check는 `/ready`, liveness check는 `/live`를 사용합니다.
+- SMTP: 기본은 `SERVER_MODE=smtp` 컨테이너를 여러 노드에 띄우고, 동일 priority MX 레코드를 여러 A/AAAA record로 분산합니다.
+- 단일 컨테이너에서 두 서버를 같이 실행해야 하면 `SERVER_MODE=all`을 사용합니다.
+- SMTP 앞단에 L4 Load Balancer를 둘 경우 SPF 검증이 원 발신 IP에 의존하므로 source IP 보존이 필수입니다. source IP 보존이 불가능하면 PROXY protocol 지원을 별도로 구현해야 합니다.
+
+예시:
+
+```bash
+# HTTP replica
+docker run -d --name mapae-http-1 \
+  --env-file .env \
+  -e SERVER_MODE=http \
+  -p 8000:8000 \
+  mapae:latest
+
+# SMTP replica
+docker run -d --name mapae-smtp-1 \
+  --env-file .env \
+  -e SERVER_MODE=smtp \
+  -p 25:2525 \
+  mapae:latest
+```
+
+#### Redis HA
+
+단일 리전에서는 Redis primary-replica HA를 권장합니다. `REDIS_WAIT_REPLICAS=1`로 설정하면 인증 상태 write 이후 replica acknowledgement를 기다리며, 충분한 replica가 확인되지 않으면 HTTP는 500, SMTP는 451 temporary error를 반환합니다.
+
+Redis Cluster나 멀티 primary active-active 구성은 별도 설계가 필요합니다. 특히 멀티 primary eventual replication은 Nonce의 정확히 한 번 소비 보장을 깨뜨릴 수 있으므로 기본 배포 모델로 사용하지 않습니다.
+
+#### 종료와 배포
+
+SIGINT/SIGTERM을 받으면 먼저 `/ready`가 503으로 바뀌고, `SHUTDOWN_DRAIN_SECONDS` 이후 HTTP/SMTP accept loop가 종료됩니다. LB와 오케스트레이터의 drain 시간은 이 값보다 길게 잡습니다.
+
+#### JWT 키 교체
+
+1. 새 Ed25519 private key를 `JWT_PRIVATE_KEY`에 배포하고 새 `JWT_KEY_ID`를 설정합니다.
+2. 이전 public JWK는 `JWT_EXTRA_JWKS_KEYS`에 JSON 배열로 넣어 JWKS에 함께 노출합니다.
+3. `JWT_TTL_SECONDS`가 지난 뒤 이전 public JWK를 `JWT_EXTRA_JWKS_KEYS`에서 제거합니다.
+
 ## API 명세
 
 아래 페이지에서 확인할 수 있습니다.
