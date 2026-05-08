@@ -21,24 +21,41 @@ pub trait Store: Send + Sync + 'static {
     /// 백엔드 가용성을 확인합니다.
     async fn ping(&self) -> Result<(), StorageError>;
 
-    /// 살아 있는 키가 있으면 `(value, true)`, 없으면 `(String::new(), false)`를 반환합니다.
-    async fn get(&self, key: &str) -> Result<(String, bool), StorageError>;
+    /// 살아 있는 키가 있으면 `Some(value)`, 없으면 `None`을 반환합니다.
+    async fn get(&self, key: &str) -> Result<Option<String>, StorageError>;
 
     /// 키를 원자적으로 삭제하고 만료되지 않은 값이 있으면 반환합니다.
-    async fn take(&self, key: &str) -> Result<(String, bool), StorageError>;
+    #[cfg(test)]
+    async fn take(&self, key: &str) -> Result<Option<String>, StorageError>;
 
     /// 키를 초 단위 TTL과 함께 저장합니다.
     ///
     /// 구현체는 0초 TTL을 거부합니다.
+    #[cfg(test)]
     async fn set_ex(&self, key: &str, value: &str, ttl_seconds: u64) -> Result<(), StorageError>;
 
-    /// Nonce를 소모하여 연관된 `auth_id`를 가져옵니다.
+    /// 인증 시작 시 auth 레코드와 nonce 레코드를 원자적으로 함께 저장합니다.
     ///
-    /// 중복 처리나 Race Condition을 방지하기 위해 단 한 번만 성공해야 합니다.
-    async fn take_nonce(&self, nonce: &str) -> Result<(String, bool), StorageError> {
-        let key = format!("nonce:{nonce}");
-        self.take(&key).await
-    }
+    /// 구현체는 둘 중 하나만 저장되는 상태를 허용하지 않아야 합니다.
+    async fn init_auth_session(
+        &self,
+        auth_key: &str,
+        auth_payload: &str,
+        nonce_key: &str,
+        nonce_value: &str,
+        ttl_seconds: u64,
+    ) -> Result<(), StorageError>;
+
+    /// Nonce를 단 한 번 소모하고, 같은 원자적 작업 안에서 검증 결과를 저장합니다.
+    ///
+    /// 성공 시 `Some(auth_id)`를 반환하고, Nonce가 없거나 만료되었으면 `None`을 반환합니다.
+    /// 저장 TTL이 0이면 Nonce를 소모하지 않고 오류를 반환해야 합니다.
+    async fn consume_nonce_and_store_verified(
+        &self,
+        nonce: &str,
+        verified_payload: &str,
+        verified_ttl_seconds: u64,
+    ) -> Result<Option<String>, StorageError>;
 }
 
 /// 선택된 저장소 백엔드.
@@ -65,20 +82,14 @@ impl Store for StoreBackend {
         }
     }
 
-    async fn get(&self, key: &str) -> Result<(String, bool), StorageError> {
+    async fn get(&self, key: &str) -> Result<Option<String>, StorageError> {
         match self {
             Self::Memory(s) => s.get(key).await,
             Self::Redis(s) => s.get(key).await,
         }
     }
 
-    async fn take(&self, key: &str) -> Result<(String, bool), StorageError> {
-        match self {
-            Self::Memory(s) => s.take(key).await,
-            Self::Redis(s) => s.take(key).await,
-        }
-    }
-
+    #[cfg(test)]
     async fn set_ex(&self, key: &str, value: &str, ttl_seconds: u64) -> Result<(), StorageError> {
         match self {
             Self::Memory(s) => s.set_ex(key, value, ttl_seconds).await,
@@ -86,10 +97,49 @@ impl Store for StoreBackend {
         }
     }
 
-    async fn take_nonce(&self, nonce: &str) -> Result<(String, bool), StorageError> {
+    async fn init_auth_session(
+        &self,
+        auth_key: &str,
+        auth_payload: &str,
+        nonce_key: &str,
+        nonce_value: &str,
+        ttl_seconds: u64,
+    ) -> Result<(), StorageError> {
         match self {
-            Self::Memory(s) => s.take_nonce(nonce).await,
-            Self::Redis(s) => s.take_nonce(nonce).await,
+            Self::Memory(s) => {
+                s.init_auth_session(auth_key, auth_payload, nonce_key, nonce_value, ttl_seconds)
+                    .await
+            }
+            Self::Redis(s) => {
+                s.init_auth_session(auth_key, auth_payload, nonce_key, nonce_value, ttl_seconds)
+                    .await
+            }
+        }
+    }
+
+    #[cfg(test)]
+    async fn take(&self, key: &str) -> Result<Option<String>, StorageError> {
+        match self {
+            Self::Memory(s) => s.take(key).await,
+            Self::Redis(s) => s.take(key).await,
+        }
+    }
+
+    async fn consume_nonce_and_store_verified(
+        &self,
+        nonce: &str,
+        verified_payload: &str,
+        verified_ttl_seconds: u64,
+    ) -> Result<Option<String>, StorageError> {
+        match self {
+            Self::Memory(s) => {
+                s.consume_nonce_and_store_verified(nonce, verified_payload, verified_ttl_seconds)
+                    .await
+            }
+            Self::Redis(s) => {
+                s.consume_nonce_and_store_verified(nonce, verified_payload, verified_ttl_seconds)
+                    .await
+            }
         }
     }
 }

@@ -705,8 +705,7 @@ async fn process_extracted_email(
         return Err(SmtpReply::new(550, "Invalid nonce", Some("5.7.1")));
     }
 
-    let auth_id = consume_nonce(auth_service, &nonce).await?;
-    store_verification(auth_service, &auth_id, &sender).await?;
+    let auth_id = store_verification_by_nonce(auth_service, &nonce, &sender).await?;
 
     info!(
         "Stored verification for auth_id={} phone={:?} carrier={:?} bytes_read={}",
@@ -907,39 +906,28 @@ fn choose_verified_sender(
     None
 }
 
-async fn consume_nonce(auth_service: &Service, nonce: &str) -> Result<String, SmtpReply> {
-    let (auth_id, ok) = auth_service
-        .consume_auth_id_by_nonce(nonce)
-        .await
-        .map_err(|e| {
-            error!("Store error while consuming nonce: {}", e);
-            SmtpReply::new(451, "Temporary server error", Some("4.3.0"))
-        })?;
-
-    if !ok {
-        warn!("Nonce not found or expired: {}", nonce);
-        return Err(SmtpReply::new(550, "Invalid nonce", Some("5.7.1")));
-    }
-
-    Ok(auth_id)
-}
-
-async fn store_verification(
+async fn store_verification_by_nonce(
     auth_service: &Service,
-    auth_id: &str,
+    nonce: &str,
     sender: &VerifiedSender,
-) -> Result<(), SmtpReply> {
-    auth_service
-        .store_verified(
-            auth_id,
+) -> Result<String, SmtpReply> {
+    let Some(auth_id) = auth_service
+        .consume_nonce_and_store_verified(
+            nonce,
             sender.phone.as_deref(),
             Some(sender.carrier.as_str()),
         )
         .await
         .map_err(|e| {
-            error!("Failed to store verification: {}", e);
+            error!("Failed to consume nonce and store verification: {}", e);
             SmtpReply::new(451, "Temporary server error", Some("4.3.0"))
-        })
+        })?
+    else {
+        warn!("Nonce not found or expired: {}", nonce);
+        return Err(SmtpReply::new(550, "Invalid nonce", Some("5.7.1")));
+    };
+
+    Ok(auth_id)
 }
 
 fn normalize_email_address(value: &str) -> Option<String> {

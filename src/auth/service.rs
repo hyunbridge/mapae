@@ -137,10 +137,13 @@ impl Service {
         let nonce_key = format!("nonce:{nonce}");
 
         self.store
-            .set_ex(&auth_key, &payload_json, self.settings.auth_ttl_seconds)
-            .await?;
-        self.store
-            .set_ex(&nonce_key, &auth_id, self.settings.auth_ttl_seconds)
+            .init_auth_session(
+                &auth_key,
+                &payload_json,
+                &nonce_key,
+                &auth_id,
+                self.settings.auth_ttl_seconds,
+            )
             .await?;
 
         let sms_body = format!("[MAPAE:{nonce}]");
@@ -170,22 +173,14 @@ impl Service {
         }
 
         let key = format!("auth:{auth_id}");
-        let (value, ok) = self.store.get(&key).await?;
-        if !ok {
+        let Some(value) = self.store.get(&key).await? else {
             return Ok(auth_check_response(AuthStatus::Expired));
-        }
+        };
 
         match serde_json::from_str::<AuthCheckResponse>(&value) {
-            Ok(decoded) if decoded.status == AuthStatus::Verified => Ok(decoded),
+            Ok(decoded) if is_complete_verified_response(&decoded) => Ok(decoded),
             _ => Ok(auth_check_response(AuthStatus::Waiting)),
         }
-    }
-
-    /// 이메일(SMTP)로 수신된 Nonce를 확인하여 해당 인증을 소모(Consume)합니다.
-    ///
-    /// 원자적 작업을 통해 동일한 Nonce가 중복 사용되지 않도록 보장합니다.
-    pub async fn consume_auth_id_by_nonce(&self, nonce: &str) -> Result<(String, bool), AuthError> {
-        Ok(self.store.take_nonce(nonce).await?)
     }
 
     /// 설정된 저장소 백엔드가 응답하는지 확인합니다.
@@ -194,13 +189,13 @@ impl Service {
         Ok(())
     }
 
-    /// 소비된 인증 세션에 검증된 전화번호와 통신사를 저장합니다.
-    pub async fn store_verified(
+    /// Nonce를 단 한 번 소모하고, 같은 저장소 작업 안에서 인증 완료 상태를 저장합니다.
+    pub async fn consume_nonce_and_store_verified(
         &self,
-        auth_id: &str,
+        nonce: &str,
         phone: Option<&str>,
         carrier: Option<&str>,
-    ) -> Result<(), AuthError> {
+    ) -> Result<Option<String>, AuthError> {
         let payload = VerifiedPayload {
             status: AuthStatus::Verified,
             phone: phone.map(std::string::ToString::to_string),
@@ -208,11 +203,15 @@ impl Service {
             timestamp: now_rfc3339(),
         };
         let payload_json = serde_json::to_string(&payload)?;
-        let key = format!("auth:{auth_id}");
-        self.store
-            .set_ex(&key, &payload_json, self.settings.verified_ttl_seconds)
-            .await?;
-        Ok(())
+
+        Ok(self
+            .store
+            .consume_nonce_and_store_verified(
+                nonce,
+                &payload_json,
+                self.settings.verified_ttl_seconds,
+            )
+            .await?)
     }
 
     /// 서명이 설정된 경우 검증된 인증 결과와 JWT를 함께 반환합니다.
@@ -261,6 +260,22 @@ fn auth_check_response(status: AuthStatus) -> AuthCheckResponse {
         timestamp: None,
         token: None,
     }
+}
+
+fn is_complete_verified_response(response: &AuthCheckResponse) -> bool {
+    response.status == AuthStatus::Verified
+        && response
+            .phone
+            .as_deref()
+            .is_some_and(|phone| !phone.is_empty())
+        && response
+            .carrier
+            .as_deref()
+            .is_some_and(|carrier| !carrier.is_empty())
+        && response
+            .timestamp
+            .as_deref()
+            .is_some_and(|timestamp| !timestamp.is_empty())
 }
 
 fn random_hex(bytes_len: usize) -> Result<String, AuthError> {
@@ -357,16 +372,17 @@ mod tests {
             .strip_suffix(']')
             .unwrap();
 
-        let (auth_id, ok) = svc.consume_auth_id_by_nonce(nonce).await.unwrap();
-        assert!(ok);
-        assert_eq!(auth_id, init.auth_id);
-
-        let (_, ok) = svc.consume_auth_id_by_nonce(nonce).await.unwrap();
-        assert!(!ok);
-
-        svc.store_verified(&init.auth_id, Some("01012345678"), Some("KT"))
+        let auth_id = svc
+            .consume_nonce_and_store_verified(nonce, Some("01012345678"), Some("KT"))
             .await
             .unwrap();
+        assert_eq!(auth_id.as_deref(), Some(init.auth_id.as_str()));
+
+        let ok = svc
+            .consume_nonce_and_store_verified(nonce, Some("01000000000"), Some("SKT"))
+            .await
+            .unwrap();
+        assert!(ok.is_none());
 
         let check = svc.check_auth(&init.auth_id).await.unwrap();
         assert_eq!(check.status, AuthStatus::Verified);
@@ -389,6 +405,25 @@ mod tests {
         assert_eq!(check.status, AuthStatus::Waiting);
     }
 
+    #[tokio::test]
+    async fn test_incomplete_verified_payload_maps_to_waiting() {
+        let store = MemoryStore::new();
+        let auth_id = "b".repeat(AUTH_ID_HEX_LENGTH);
+        store
+            .set_ex(
+                &format!("auth:{auth_id}"),
+                r#"{"status":"verified","timestamp":"2026-05-08T00:00:00Z"}"#,
+                60,
+            )
+            .await
+            .unwrap();
+        let settings = Settings::default();
+        let svc = Service::new(crate::storage::StoreBackend::memory(store), &settings).unwrap();
+
+        let check = svc.check_auth(&auth_id).await.unwrap();
+        assert_eq!(check.status, AuthStatus::Waiting);
+    }
+
     #[test]
     fn test_auth_status_serializes_as_lowercase_string() {
         let response = auth_check_response(AuthStatus::Verified);
@@ -402,14 +437,25 @@ mod tests {
     #[tokio::test]
     async fn test_store_verified_writes_rfc3339_timestamp_without_fraction() {
         let store = MemoryStore::new();
-        let settings = Settings::default();
+        let settings = Settings {
+            auth_ttl_seconds: 60,
+            verified_ttl_seconds: 30,
+            sms_inbound_address: "verify@example.com".to_string(),
+            ..Settings::default()
+        };
         let svc = Service::new(crate::storage::StoreBackend::memory(store), &settings).unwrap();
-        let auth_id = "c".repeat(AUTH_ID_HEX_LENGTH);
+        let init = svc.init_auth().await.unwrap();
+        let nonce = init
+            .sms_body
+            .strip_prefix("[MAPAE:")
+            .unwrap()
+            .strip_suffix(']')
+            .unwrap();
 
-        svc.store_verified(&auth_id, Some("01012345678"), Some("KT"))
+        svc.consume_nonce_and_store_verified(nonce, Some("01012345678"), Some("KT"))
             .await
             .unwrap();
-        let check = svc.check_auth(&auth_id).await.unwrap();
+        let check = svc.check_auth(&init.auth_id).await.unwrap();
 
         let timestamp = check.timestamp.unwrap();
         assert_eq!(timestamp.len(), "2006-01-02T15:04:05Z".len());
@@ -418,14 +464,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_consume_then_store_verified_flow() {
+    async fn test_consume_nonce_and_store_verified_flow() {
         let store = MemoryStore::new();
         let settings = Settings {
             auth_ttl_seconds: 60,
-            verified_ttl_seconds: 0,
+            verified_ttl_seconds: 30,
             sms_inbound_address: "verify@example.com".to_string(),
-            jwt_issuer: "https://issuer.example".to_string(),
-            jwt_ttl_seconds: 120,
             ..Settings::default()
         };
         let svc = Service::new(crate::storage::StoreBackend::memory(store), &settings).unwrap();
@@ -438,23 +482,49 @@ mod tests {
             .strip_suffix(']')
             .unwrap();
 
-        let (auth_id, ok) = svc.consume_auth_id_by_nonce(nonce).await.unwrap();
-        assert!(ok, "nonce should be consumed first");
-        assert_eq!(auth_id, init.auth_id);
+        let auth_id = svc
+            .consume_nonce_and_store_verified(nonce, Some("01012345678"), Some("KT"))
+            .await
+            .unwrap();
+        assert_eq!(auth_id.as_deref(), Some(init.auth_id.as_str()));
 
-        let (_, ok) = svc.consume_auth_id_by_nonce(nonce).await.unwrap();
-        assert!(!ok, "nonce should be consumed exactly once");
+        let ok = svc
+            .consume_nonce_and_store_verified(nonce, Some("01000000000"), Some("SKT"))
+            .await
+            .unwrap();
+        assert!(ok.is_none());
+
+        let check = svc.check_auth(&init.auth_id).await.unwrap();
+        assert_eq!(check.status, AuthStatus::Verified);
+        assert_eq!(check.phone.as_deref(), Some("01012345678"));
+        assert_eq!(check.carrier.as_deref(), Some("KT"));
+    }
+
+    #[tokio::test]
+    async fn test_consume_nonce_and_store_verified_rejects_zero_ttl_without_consuming_nonce() {
+        let store = MemoryStore::new();
+        let settings = Settings {
+            auth_ttl_seconds: 60,
+            verified_ttl_seconds: 0,
+            sms_inbound_address: "verify@example.com".to_string(),
+            ..Settings::default()
+        };
+        let svc = Service::new(crate::storage::StoreBackend::memory(store), &settings).unwrap();
+
+        let init = svc.init_auth().await.unwrap();
+        let nonce = init
+            .sms_body
+            .strip_prefix("[MAPAE:")
+            .unwrap()
+            .strip_suffix(']')
+            .unwrap();
 
         let result = svc
-            .store_verified(&auth_id, Some("01012345678"), Some("KT"))
+            .consume_nonce_and_store_verified(nonce, Some("01012345678"), Some("KT"))
             .await;
-        assert!(result.is_err(), "store_verified should fail with ttl=0");
+        assert!(result.is_err());
 
-        let check = svc.check_auth(&auth_id).await.unwrap();
-        assert_eq!(
-            check.status,
-            AuthStatus::Waiting,
-            "auth should not be verified"
-        );
+        let check = svc.check_auth(&init.auth_id).await.unwrap();
+        assert_eq!(check.status, AuthStatus::Waiting);
     }
 }
