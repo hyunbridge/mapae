@@ -19,15 +19,52 @@ return 1
 /// 인증 상태를 공유하기 위한 Redis 저장소.
 pub struct RedisStore {
     connection: redis::aio::ConnectionManager,
+    wait_replicas: usize,
+    wait_timeout_ms: u64,
 }
 
 impl RedisStore {
     /// Redis URL로 connection manager를 엽니다.
-    pub async fn new(redis_url: &str) -> Result<Self, StorageError> {
+    pub async fn new(
+        redis_url: &str,
+        wait_replicas: usize,
+        wait_timeout_ms: u64,
+    ) -> Result<Self, StorageError> {
         let client = redis::Client::open(redis_url)?;
         let connection = client.get_connection_manager().await?;
-        Ok(Self { connection })
+        Ok(Self {
+            connection,
+            wait_replicas,
+            wait_timeout_ms,
+        })
     }
+
+    async fn wait_for_replica_ack(
+        &self,
+        conn: &mut redis::aio::ConnectionManager,
+    ) -> Result<(), StorageError> {
+        if self.wait_replicas == 0 {
+            return Ok(());
+        }
+
+        let acknowledged: usize = redis::cmd("WAIT")
+            .arg(self.wait_replicas)
+            .arg(self.wait_timeout_ms)
+            .query_async(conn)
+            .await?;
+        ensure_replica_ack(self.wait_replicas, acknowledged)
+    }
+}
+
+fn ensure_replica_ack(expected: usize, acknowledged: usize) -> Result<(), StorageError> {
+    if acknowledged < expected {
+        return Err(StorageError::InsufficientReplicas {
+            expected,
+            acknowledged,
+        });
+    }
+
+    Ok(())
 }
 
 impl Store for RedisStore {
@@ -58,6 +95,7 @@ impl Store for RedisStore {
             .arg(value)
             .query_async::<()>(&mut conn)
             .await?;
+        self.wait_for_replica_ack(&mut conn).await?;
         Ok(())
     }
 
@@ -82,6 +120,7 @@ impl Store for RedisStore {
             .arg(nonce_value)
             .invoke_async::<()>(&mut conn)
             .await?;
+        self.wait_for_replica_ack(&mut conn).await?;
         Ok(())
     }
 
@@ -113,6 +152,7 @@ impl Store for RedisStore {
                 .await?;
 
         if found == 1 {
+            self.wait_for_replica_ack(&mut conn).await?;
             Ok(Some(auth_id))
         } else {
             Ok(None)
@@ -126,6 +166,24 @@ mod tests {
 
     #[tokio::test]
     async fn test_new_invalid_url() {
-        assert!(RedisStore::new("not-a-redis-url").await.is_err());
+        assert!(RedisStore::new("not-a-redis-url", 0, 1000).await.is_err());
+    }
+
+    #[test]
+    fn test_ensure_replica_ack_accepts_disabled_or_enough_replicas() {
+        assert!(ensure_replica_ack(0, 0).is_ok());
+        assert!(ensure_replica_ack(1, 1).is_ok());
+        assert!(ensure_replica_ack(1, 2).is_ok());
+    }
+
+    #[test]
+    fn test_ensure_replica_ack_rejects_insufficient_replicas() {
+        assert!(matches!(
+            ensure_replica_ack(2, 1),
+            Err(StorageError::InsufficientReplicas {
+                expected: 2,
+                acknowledged: 1
+            })
+        ));
     }
 }

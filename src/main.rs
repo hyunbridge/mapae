@@ -63,9 +63,13 @@ async fn main() -> anyhow::Result<()> {
         }
 
         info!("Using Redis store");
-        let store = storage::redis::RedisStore::new(&settings.redis_url)
-            .await
-            .context("Failed to initialize Redis client")?;
+        let store = storage::redis::RedisStore::new(
+            &settings.redis_url,
+            settings.redis_wait_replicas,
+            settings.redis_wait_timeout_ms,
+        )
+        .await
+        .context("Failed to initialize Redis client")?;
         storage::StoreBackend::redis(store)
     };
 

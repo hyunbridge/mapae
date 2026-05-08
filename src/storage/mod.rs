@@ -10,6 +10,11 @@ use thiserror::Error;
 pub enum StorageError {
     #[error("invalid ttl")]
     InvalidTtl,
+    #[error("redis write acknowledged by {acknowledged} replicas, expected {expected}")]
+    InsufficientReplicas {
+        expected: usize,
+        acknowledged: usize,
+    },
     #[error("redis error: {0}")]
     Redis(#[from] ::redis::RedisError),
 }

@@ -46,6 +46,8 @@ MAPAE는 SMTP 서버와 HTTP API를 동시에 제공합니다.
 | :--- | :--- | :--- |
 | `USE_IN_MEMORY_STORE` | `false` | `true`로 설정 시 Redis 대신 In-Memory 스토어 사용 |
 | `REDIS_URL` | *(빈 문자열)* | Redis 연결 주소 (`USE_IN_MEMORY_STORE=false`이면 필요) |
+| `REDIS_WAIT_REPLICAS` | `0` | Redis write 후 기다릴 replica acknowledgement 수 (`0`이면 비활성화) |
+| `REDIS_WAIT_TIMEOUT_MS` | `1000` | Redis `WAIT` 명령 타임아웃(ms) |
 
 ### SMTP 서버
 

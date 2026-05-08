@@ -14,6 +14,12 @@ pub struct Settings {
     pub use_in_memory_store: bool,
     /// 메모리 저장소를 쓰지 않을 때 사용할 Redis 연결 URL.
     pub redis_url: String,
+    /// Redis write 후 기다릴 replica acknowledgement 개수. 0이면 비활성화합니다.
+    #[serde(deserialize_with = "deserialize_redis_wait_replicas")]
+    pub redis_wait_replicas: usize,
+    /// Redis WAIT 명령 타임아웃(ms).
+    #[serde(deserialize_with = "deserialize_redis_wait_timeout_ms")]
+    pub redis_wait_timeout_ms: u64,
     /// SMTP 리스너 호스트.
     pub smtp_host: String,
     /// SMTP 리스너 포트.
@@ -78,6 +84,8 @@ impl Default for Settings {
             debug: false,
             use_in_memory_store: false,
             redis_url: String::new(),
+            redis_wait_replicas: 0,
+            redis_wait_timeout_ms: 1000,
             smtp_host: "0.0.0.0".to_string(),
             smtp_port: 2525,
             smtp_max_connections: 1024,
@@ -137,6 +145,20 @@ where
     D: serde::Deserializer<'de>,
 {
     deserialize_from_str_or_default(deserializer, || Settings::default().http_max_connections)
+}
+
+fn deserialize_redis_wait_replicas<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_from_str_or_default(deserializer, || Settings::default().redis_wait_replicas)
+}
+
+fn deserialize_redis_wait_timeout_ms<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_from_str_or_default(deserializer, || Settings::default().redis_wait_timeout_ms)
 }
 
 fn deserialize_auth_ttl_seconds<'de, D>(deserializer: D) -> Result<u64, D::Error>
@@ -237,12 +259,16 @@ mod tests {
             ("HTTP_PORT", " 9000 "),
             ("SMTP_MAX_CONNECTIONS", "0"),
             ("HTTP_MAX_CONNECTIONS", "not-a-number"),
+            ("REDIS_WAIT_REPLICAS", "2"),
+            ("REDIS_WAIT_TIMEOUT_MS", "1500"),
         ]);
 
         assert_eq!(settings.smtp_port, 2526);
         assert_eq!(settings.http_port, 9000);
         assert_eq!(settings.smtp_max_connections, 1);
         assert_eq!(settings.http_max_connections, 1024);
+        assert_eq!(settings.redis_wait_replicas, 2);
+        assert_eq!(settings.redis_wait_timeout_ms, 1500);
     }
 
     #[test]
@@ -277,6 +303,8 @@ mod tests {
             "DEBUG",
             "USE_IN_MEMORY_STORE",
             "REDIS_URL",
+            "REDIS_WAIT_REPLICAS",
+            "REDIS_WAIT_TIMEOUT_MS",
             "SMTP_HOST",
             "SMTP_PORT",
             "SMTP_MAX_CONNECTIONS",
@@ -298,6 +326,8 @@ mod tests {
         assert!(!s.debug);
         assert!(!s.use_in_memory_store);
         assert!(s.redis_url.is_empty());
+        assert_eq!(s.redis_wait_replicas, 0);
+        assert_eq!(s.redis_wait_timeout_ms, 1000);
         assert_eq!(s.smtp_host, "0.0.0.0");
         assert_eq!(s.smtp_port, 2525);
         assert_eq!(s.smtp_max_connections, 1024);
