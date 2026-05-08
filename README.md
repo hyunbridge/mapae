@@ -82,6 +82,8 @@ MAPAE는 SMTP 서버와 HTTP API를 동시에 제공합니다.
 | 변수명 | 기본값 | 설명 |
 | :--- | :--- | :--- |
 | `JWT_PRIVATE_KEY` | *(빈 문자열)* | Ed25519 PEM 개인키 (설정하지 않으면 JWT 서명 기능 비활성화) |
+| `JWT_KEY_ID` | `default` | JWT header와 JWKS current key에 넣을 `kid` |
+| `JWT_EXTRA_JWKS_KEYS` | `[]` | JWKS에 함께 노출할 이전 public JWK 목록(JSON 배열, 각 항목은 고유한 `kid`를 가져야 함) |
 | `JWT_ISSUER` | `https://example.com` | JWT `iss` 클레임 값 |
 | `JWT_TTL_SECONDS` | `3600` | 발급된 JWT의 유효 시간 (초) |
 

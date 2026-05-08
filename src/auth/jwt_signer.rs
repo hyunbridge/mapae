@@ -3,7 +3,8 @@ use ed25519_dalek::pkcs8::{DecodePrivateKey, Error as Pkcs8Error};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{json, Value};
+use std::collections::HashSet;
 use thiserror::Error;
 use time::OffsetDateTime;
 
@@ -18,6 +19,8 @@ pub struct JwtSigner {
     verifying_key: VerifyingKey,
     issuer: String,
     ttl_seconds: u64,
+    key_id: String,
+    extra_jwks_keys: Vec<Value>,
 }
 
 /// JWT 서명 설정 또는 사용 중 발생하는 오류.
@@ -70,12 +73,16 @@ impl JwtSigner {
                 "JWT_TTL_SECONDS must be greater than 0",
             ));
         }
+        let key_id = normalize_key_id(&settings.jwt_key_id);
+        let extra_jwks_keys = parse_extra_jwks_keys(&settings.jwt_extra_jwks_keys, &key_id)?;
 
         Ok(Some(Self {
             encoding_key,
             verifying_key,
             issuer: settings.jwt_issuer.clone(),
             ttl_seconds: settings.jwt_ttl_seconds,
+            key_id,
+            extra_jwks_keys,
         }))
     }
 
@@ -110,6 +117,7 @@ impl JwtSigner {
 
         let mut header = Header::new(Algorithm::EdDSA);
         header.typ = Some("JWT".to_string());
+        header.kid = Some(self.key_id.clone());
 
         jsonwebtoken::encode(&header, &claims, &self.encoding_key).map_err(JwtError::from)
     }
@@ -119,15 +127,17 @@ impl JwtSigner {
         let pub_bytes = self.verifying_key.to_bytes();
         let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(pub_bytes);
 
-        let jwks = json!({
-            "keys": [{
-                "kty": "OKP",
-                "crv": "Ed25519",
-                "x": x,
-                "use": "sig",
-                "alg": "EdDSA"
-            }]
-        });
+        let mut keys = vec![json!({
+            "kty": "OKP",
+            "crv": "Ed25519",
+            "x": x,
+            "use": "sig",
+            "alg": "EdDSA",
+            "kid": self.key_id.clone()
+        })];
+        keys.extend(self.extra_jwks_keys.iter().cloned());
+
+        let jwks = json!({ "keys": keys });
 
         serde_json::to_vec(&jwks).map_err(JwtError::from)
     }
@@ -159,6 +169,101 @@ fn normalize_pem(raw: &str) -> String {
     value
 }
 
+fn normalize_key_id(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        Settings::default().jwt_key_id
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn parse_extra_jwks_keys(raw: &str, current_key_id: &str) -> Result<Vec<Value>, JwtError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let parsed: Vec<Value> = serde_json::from_str(trimmed)
+        .map_err(|_| JwtError::InvalidConfig("JWT_EXTRA_JWKS_KEYS must be a JSON array"))?;
+
+    let mut seen_kids = HashSet::new();
+    for key in &parsed {
+        let Some(object) = key.as_object() else {
+            return Err(JwtError::InvalidConfig(
+                "JWT_EXTRA_JWKS_KEYS entries must be JSON objects",
+            ));
+        };
+
+        let Some(kid) = object.get("kid").and_then(Value::as_str) else {
+            return Err(JwtError::InvalidConfig(
+                "JWT_EXTRA_JWKS_KEYS entries must include string kid values",
+            ));
+        };
+        let kid = kid.trim();
+        if kid.is_empty() {
+            return Err(JwtError::InvalidConfig(
+                "JWT_EXTRA_JWKS_KEYS entries must include string kid values",
+            ));
+        }
+        if kid == current_key_id {
+            return Err(JwtError::InvalidConfig(
+                "JWT_EXTRA_JWKS_KEYS cannot duplicate the current kid",
+            ));
+        }
+        if !seen_kids.insert(kid.to_string()) {
+            return Err(JwtError::InvalidConfig(
+                "JWT_EXTRA_JWKS_KEYS contains duplicate kid values",
+            ));
+        }
+
+        if object.get("kty").and_then(Value::as_str) != Some("OKP") {
+            return Err(JwtError::InvalidConfig(
+                "JWT_EXTRA_JWKS_KEYS entries must be OKP keys",
+            ));
+        }
+        if object.get("crv").and_then(Value::as_str) != Some("Ed25519") {
+            return Err(JwtError::InvalidConfig(
+                "JWT_EXTRA_JWKS_KEYS entries must use Ed25519",
+            ));
+        }
+        if let Some(key_use) = object.get("use").and_then(Value::as_str) {
+            if key_use != "sig" {
+                return Err(JwtError::InvalidConfig(
+                    "JWT_EXTRA_JWKS_KEYS entries must be signature keys",
+                ));
+            }
+        }
+        if let Some(alg) = object.get("alg").and_then(Value::as_str) {
+            if alg != "EdDSA" {
+                return Err(JwtError::InvalidConfig(
+                    "JWT_EXTRA_JWKS_KEYS entries must use EdDSA",
+                ));
+            }
+        }
+
+        let Some(x) = object.get("x").and_then(Value::as_str) else {
+            return Err(JwtError::InvalidConfig(
+                "JWT_EXTRA_JWKS_KEYS entries must include public x values",
+            ));
+        };
+        let decoded_x = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(x)
+            .map_err(|_| {
+                JwtError::InvalidConfig(
+                    "JWT_EXTRA_JWKS_KEYS x values must be base64url-encoded public keys",
+                )
+            })?;
+        if decoded_x.len() != 32 {
+            return Err(JwtError::InvalidConfig(
+                "JWT_EXTRA_JWKS_KEYS x values must be 32-byte Ed25519 public keys",
+            ));
+        }
+    }
+
+    Ok(parsed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,6 +279,48 @@ mod tests {
         assert!(!got.contains('"'));
         assert!(got.contains("-----BEGIN PRIVATE KEY-----"));
         assert!(got.contains("-----END PRIVATE KEY-----"));
+    }
+
+    #[test]
+    fn test_normalize_key_id() {
+        assert_eq!(normalize_key_id(" current "), "current");
+        assert_eq!(normalize_key_id("  "), "default");
+    }
+
+    #[test]
+    fn test_parse_extra_jwks_keys() {
+        let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([1u8; 32]);
+        let keys = parse_extra_jwks_keys(
+            &format!(r#"[{{"kid":"old","kty":"OKP","crv":"Ed25519","x":"{x}"}}]"#),
+            "current",
+        )
+        .unwrap();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0]["kid"], "old");
+
+        assert!(parse_extra_jwks_keys("", "current").unwrap().is_empty());
+        assert!(parse_extra_jwks_keys("{}", "current").is_err());
+        assert!(parse_extra_jwks_keys(r#"["bad"]"#, "current").is_err());
+        assert!(parse_extra_jwks_keys(
+            &format!(r#"[{{"kid":"current","kty":"OKP","crv":"Ed25519","x":"{x}"}}]"#),
+            "current"
+        )
+        .is_err());
+        assert!(parse_extra_jwks_keys(
+            &format!(
+                r#"[
+                        {{"kid":"a","kty":"OKP","crv":"Ed25519","x":"{x}"}},
+                        {{"kid":"a","kty":"OKP","crv":"Ed25519","x":"{x}"}}
+                    ]"#
+            ),
+            "current"
+        )
+        .is_err());
+        assert!(parse_extra_jwks_keys(
+            r#"[{"kid":"old","kty":"RSA","crv":"Ed25519","x":"bad"}]"#,
+            "current"
+        )
+        .is_err());
     }
 
     #[test]
@@ -220,6 +367,11 @@ mod tests {
 
         let settings = Settings {
             jwt_private_key_pem: pkcs8.to_string(),
+            jwt_key_id: "current-key".to_string(),
+            jwt_extra_jwks_keys: format!(
+                r#"[{{"kty":"OKP","crv":"Ed25519","x":"{}","use":"sig","alg":"EdDSA","kid":"old-key"}}]"#,
+                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([2u8; 32])
+            ),
             jwt_issuer: "https://issuer.example".to_string(),
             jwt_ttl_seconds: 3600,
             ..Settings::default()
@@ -234,6 +386,7 @@ mod tests {
         let header = decode_header(&token).unwrap();
         assert_eq!(header.alg, Algorithm::EdDSA);
         assert_eq!(header.typ.as_deref(), Some("JWT"));
+        assert_eq!(header.kid.as_deref(), Some("current-key"));
 
         let public_pem = signer
             .verifying_key
@@ -253,8 +406,27 @@ mod tests {
         let jwks_bytes = signer.jwks().unwrap();
         let jwks: serde_json::Value = serde_json::from_slice(&jwks_bytes).unwrap();
         let keys = jwks["keys"].as_array().unwrap();
-        assert_eq!(keys.len(), 1);
+        assert_eq!(keys.len(), 2);
         assert_eq!(keys[0]["alg"], "EdDSA");
         assert_eq!(keys[0]["crv"], "Ed25519");
+        assert_eq!(keys[0]["kid"], "current-key");
+        assert_eq!(keys[1]["kid"], "old-key");
+    }
+
+    #[test]
+    fn test_signer_rejects_invalid_extra_jwks_keys_when_enabled() {
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let pkcs8 = signing_key.to_pkcs8_pem(LineEnding::default()).unwrap();
+
+        let settings = Settings {
+            jwt_private_key_pem: pkcs8.to_string(),
+            jwt_extra_jwks_keys: "not-json".to_string(),
+            ..Settings::default()
+        };
+
+        assert!(matches!(
+            JwtSigner::new(&settings),
+            Err(JwtError::InvalidConfig(_))
+        ));
     }
 }

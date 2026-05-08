@@ -77,6 +77,10 @@ pub struct Settings {
     /// JWT 서명에 사용할 Ed25519 PKCS#8 private key PEM.
     #[serde(rename = "jwt_private_key")]
     pub jwt_private_key_pem: String,
+    /// JWT header와 JWKS current key에 넣을 key id.
+    pub jwt_key_id: String,
+    /// JWKS에 함께 노출할 이전 public JWK 목록(JSON array).
+    pub jwt_extra_jwks_keys: String,
     /// JWT issuer claim.
     pub jwt_issuer: String,
     /// JWT 유효 기간.
@@ -124,6 +128,8 @@ impl Default for Settings {
             auth_ttl_seconds: 600,
             verified_ttl_seconds: 300,
             jwt_private_key_pem: String::new(),
+            jwt_key_id: "default".to_string(),
+            jwt_extra_jwks_keys: "[]".to_string(),
             jwt_issuer: "https://example.com".to_string(),
             jwt_ttl_seconds: 3600,
         }
@@ -386,6 +392,8 @@ mod tests {
             "AUTH_TTL_SECONDS",
             "VERIFIED_TTL_SECONDS",
             "JWT_PRIVATE_KEY",
+            "JWT_KEY_ID",
+            "JWT_EXTRA_JWKS_KEYS",
             "JWT_ISSUER",
             "JWT_TTL_SECONDS",
         ] {
@@ -410,6 +418,8 @@ mod tests {
         assert_eq!(s.cors_allow_origins, vec!["*"]);
         assert_eq!(s.auth_ttl_seconds, 600);
         assert_eq!(s.verified_ttl_seconds, 300);
+        assert_eq!(s.jwt_key_id, "default");
+        assert_eq!(s.jwt_extra_jwks_keys, "[]");
         assert_eq!(s.jwt_issuer, "https://example.com");
         assert_eq!(s.jwt_ttl_seconds, 3600);
     }
