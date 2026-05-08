@@ -100,7 +100,7 @@ pub fn extract_phone_and_carrier(from_address: &str) -> (Option<String>, Option<
     }
 
     let phone = normalize_digits(local);
-    if !(9..=11).contains(&phone.len()) {
+    if !(10..=11).contains(&phone.len()) {
         return (None, None);
     }
 
@@ -246,6 +246,10 @@ mod tests {
         assert_eq!(phone, Some("01011112222".to_string()));
         assert_eq!(carrier, None);
 
+        let (phone, carrier) = extract_phone_and_carrier("010-123-4567@mms.kt.co.kr");
+        assert_eq!(phone, Some("0101234567".to_string()));
+        assert_eq!(carrier, Some("KT".to_string()));
+
         let (phone, carrier) =
             extract_phone_and_carrier("010-1234-5678@mms.kt.co.kr <attacker@attacker-domain.com>");
         assert_eq!(phone, None);
@@ -258,6 +262,10 @@ mod tests {
         assert_eq!(carrier, None);
 
         let (phone, carrier) = extract_phone_and_carrier("0---------@mms.kt.co.kr");
+        assert_eq!(phone, None);
+        assert_eq!(carrier, None);
+
+        let (phone, carrier) = extract_phone_and_carrier("010-12-3456@mms.kt.co.kr");
         assert_eq!(phone, None);
         assert_eq!(carrier, None);
 

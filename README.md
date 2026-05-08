@@ -63,6 +63,8 @@ MAPAE는 SMTP 서버와 HTTP API를 동시에 제공합니다.
 | `SMS_INBOUND_ADDRESS` | `verify@example.com` | 인바운드 수신 주소 (정확히 일치하지 않으면 수신 거부) |
 | `DUMP_INBOUND` | `false` | 수신된 이메일의 헤더/본문을 로그에 출력 |
 
+인증에 사용되는 발신 주소의 local-part는 10~11자리 숫자여야 합니다.
+
 ### HTTP 서버
 
 | 변수명 | 기본값 | 설명 |
