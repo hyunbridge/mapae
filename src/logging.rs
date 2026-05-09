@@ -1,13 +1,31 @@
-use tracing::Level;
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::filter::LevelFilter;
 
 pub fn init(debug: bool) {
-    let level = if debug { Level::DEBUG } else { Level::INFO };
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level.to_string()));
+    let default_level = if debug {
+        LevelFilter::DEBUG
+    } else {
+        LevelFilter::INFO
+    };
+    let level = std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|value| parse_log_level(&value))
+        .unwrap_or(default_level);
 
     tracing_subscriber::fmt()
         .with_target(false)
-        .with_env_filter(filter)
+        .with_max_level(level)
         .init();
+}
+
+fn parse_log_level(value: &str) -> Option<LevelFilter> {
+    let directive = value.split(',').next()?.trim().to_ascii_lowercase();
+    match directive.as_str() {
+        "trace" => Some(LevelFilter::TRACE),
+        "debug" => Some(LevelFilter::DEBUG),
+        "info" => Some(LevelFilter::INFO),
+        "warn" | "warning" => Some(LevelFilter::WARN),
+        "error" => Some(LevelFilter::ERROR),
+        "off" => Some(LevelFilter::OFF),
+        _ => None,
+    }
 }
