@@ -168,14 +168,6 @@ impl SmtpReply {
             enhanced,
         }
     }
-
-    fn line(&self) -> String {
-        if let Some(enhanced) = self.enhanced {
-            format!("{} {} {}\r\n", self.status, enhanced, self.message)
-        } else {
-            format!("{} {}\r\n", self.status, self.message)
-        }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -409,7 +401,26 @@ async fn receive_and_process_data(
 }
 
 async fn write_reply(reader: &mut BufReader<TcpStream>, reply: SmtpReply) -> io::Result<()> {
-    write_line(reader, &reply.line()).await
+    let stream = reader.get_mut();
+    let status = smtp_status_bytes(reply.status);
+    stream.write_all(&status).await?;
+    stream.write_all(b" ").await?;
+    if let Some(enhanced) = reply.enhanced {
+        stream.write_all(enhanced.as_bytes()).await?;
+        stream.write_all(b" ").await?;
+    }
+    stream.write_all(reply.message.as_bytes()).await?;
+    stream.write_all(b"\r\n").await?;
+    stream.flush().await
+}
+
+fn smtp_status_bytes(status: u16) -> [u8; 3] {
+    debug_assert!((100..=999).contains(&status));
+    [
+        b'0' + ((status / 100) % 10) as u8,
+        b'0' + ((status / 10) % 10) as u8,
+        b'0' + (status % 10) as u8,
+    ]
 }
 
 async fn write_line(reader: &mut BufReader<TcpStream>, line: &str) -> io::Result<()> {
@@ -633,6 +644,8 @@ fn parse_helo_domain(command: &str) -> Option<&str> {
 
 fn handle_rcpt(config: &Settings, session: &SmtpSession, to: &str) -> Result<(), SmtpReply> {
     let inbound = config.sms_inbound_address.trim();
+    // 빈 inbound 주소는 기존 Go 구현 및 개발 환경과의 호환을 위해 모든 RCPT를 허용한다.
+    // 운영 기본값은 verify@example.com 같은 명시적 수신 주소를 두고 이 경로를 타지 않게 한다.
     if !is_rcpt_allowed(inbound, to.trim()) {
         warn!("Rejected RCPT TO for {} from {}", to, session.peer_addr);
         return Err(SmtpReply::new(
@@ -977,6 +990,7 @@ fn is_rcpt_allowed(inbound: &str, to: &str) -> bool {
     inbound.trim().is_empty() || to.trim().eq_ignore_ascii_case(inbound.trim())
 }
 
+#[derive(Default)]
 struct SpfCheck {
     pass: bool,
     temp_error: bool,
@@ -1028,9 +1042,9 @@ mod tests {
     use super::{
         choose_verified_sender, ensure_spf_accepted, is_rcpt_allowed, map_stream_parse_error,
         normalize_email_address, parse_helo_domain, parse_smtp_path, parser, read_data,
-        read_line_limited, smtp_host_domain, stream_extract_data, SenderCandidate, SenderSpfChecks,
-        SmtpReply, SpfCheck, APP_NAME, DATA_SIZE_LIMIT_BYTES, SMTP_COMMAND_TIMEOUT,
-        SMTP_MAX_LINE_BYTES,
+        read_line_limited, smtp_host_domain, smtp_status_bytes, stream_extract_data,
+        SenderCandidate, SenderSpfChecks, SmtpReply, SpfCheck, APP_NAME, DATA_SIZE_LIMIT_BYTES,
+        SMTP_COMMAND_TIMEOUT, SMTP_MAX_LINE_BYTES,
     };
     use crate::config::Settings;
     use tokio::io::{AsyncWriteExt, BufReader};
@@ -1112,6 +1126,12 @@ mod tests {
     }
 
     #[test]
+    fn smtp_status_bytes_formats_three_digit_status() {
+        assert_eq!(smtp_status_bytes(250), *b"250");
+        assert_eq!(smtp_status_bytes(552), *b"552");
+    }
+
+    #[test]
     fn rcpt_policy_matches_go_behavior() {
         assert!(is_rcpt_allowed("", "verify@example.com"));
         assert!(is_rcpt_allowed("verify@example.com", "VERIFY@example.com"));
@@ -1126,15 +1146,18 @@ mod tests {
         }
     }
 
-    fn spf_check(pass: bool, temp_error: bool) -> SpfCheck {
-        SpfCheck { pass, temp_error }
+    fn spf_check(pass: bool) -> SpfCheck {
+        SpfCheck {
+            pass,
+            ..Default::default()
+        }
     }
 
     #[test]
     fn choose_verified_sender_prefers_valid_envelope_sender() {
         let checks = SenderSpfChecks {
-            envelope: spf_check(true, false),
-            header: Some(spf_check(true, false)),
+            envelope: spf_check(true),
+            header: Some(spf_check(true)),
         };
 
         let sender = choose_verified_sender(
@@ -1151,8 +1174,8 @@ mod tests {
     #[test]
     fn choose_verified_sender_falls_back_to_header_sender() {
         let checks = SenderSpfChecks {
-            envelope: spf_check(true, false),
-            header: Some(spf_check(true, false)),
+            envelope: spf_check(true),
+            header: Some(spf_check(true)),
         };
 
         let sender = choose_verified_sender(
@@ -1169,8 +1192,11 @@ mod tests {
     #[test]
     fn ensure_spf_accepted_maps_failures_to_smtp_replies() {
         let temp_error = SenderSpfChecks {
-            envelope: spf_check(false, true),
-            header: Some(spf_check(false, false)),
+            envelope: SpfCheck {
+                temp_error: true,
+                ..Default::default()
+            },
+            header: Some(SpfCheck::default()),
         };
         assert_eq!(
             ensure_spf_accepted(
@@ -1184,8 +1210,8 @@ mod tests {
         );
 
         let fail = SenderSpfChecks {
-            envelope: spf_check(false, false),
-            header: Some(spf_check(false, false)),
+            envelope: SpfCheck::default(),
+            header: Some(SpfCheck::default()),
         };
         assert_eq!(
             ensure_spf_accepted(&fail, "127.0.0.1", "mail@example.com", "hdr@example.com")
