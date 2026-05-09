@@ -81,6 +81,8 @@ MAPAE는 SMTP 서버와 HTTP API를 동시에 제공합니다.
 | `AUTH_TTL_SECONDS` | `600` | 인증 시도(Nonce) 유효 시간 (초) |
 | `VERIFIED_TTL_SECONDS` | `300` | 인증 완료 후 결과 보관 시간 (초) |
 
+`auth_id`는 16바이트 난수의 32자 hex 문자열이며, SMS 본문에 들어가는 Nonce는 32바이트 난수의 64자 hex 문자열입니다. 모든 TTL 값은 0보다 커야 합니다.
+
 ### JWT
 
 | 변수명 | 기본값 | 설명 |
