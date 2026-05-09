@@ -15,7 +15,7 @@ use warp::http::StatusCode;
 use warp::{Filter, Reply};
 
 use crate::auth::{AuthError, Service};
-use crate::config::Settings;
+use crate::config::{allows_any_cors_origin, Settings};
 use crate::metrics::METRICS;
 use crate::runtime::RuntimeState;
 
@@ -262,10 +262,6 @@ fn build_cors(origins: &[String]) -> warp::filters::cors::Cors {
     }
 }
 
-fn allows_any_cors_origin(origins: &[String]) -> bool {
-    origins.iter().any(|origin| origin.trim() == "*")
-}
-
 fn with_auth(
     auth: Arc<Service>,
 ) -> impl Filter<Extract = (Arc<Service>,), Error = Infallible> + Clone {
@@ -486,10 +482,8 @@ fn error_response(detail: &str) -> ErrorResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        allows_any_cors_origin, build_cors, readiness_response, response_with_text_body,
-        PROMETHEUS_CONTENT_TYPE,
-    };
+    use super::{build_cors, readiness_response, response_with_text_body, PROMETHEUS_CONTENT_TYPE};
+    use crate::config::allows_any_cors_origin;
     use warp::http::header::CONTENT_TYPE;
     use warp::http::StatusCode;
 

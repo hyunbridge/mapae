@@ -336,6 +336,10 @@ fn normalize_cors_allow_origins(origins: Vec<String>) -> Vec<String> {
     normalized
 }
 
+pub(crate) fn allows_any_cors_origin(origins: &[String]) -> bool {
+    origins.iter().any(|origin| origin.trim() == "*")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
