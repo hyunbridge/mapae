@@ -1,7 +1,6 @@
 use base64::Engine;
 use ed25519_dalek::pkcs8::{DecodePrivateKey, Error as Pkcs8Error};
-use ed25519_dalek::{SigningKey, VerifyingKey};
-use jsonwebtoken::{Algorithm, EncodingKey, Header};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -15,7 +14,7 @@ use crate::config::Settings;
 /// 휴대폰 인증이 성공적으로 완료되었을 때 클라이언트에게 반환할 보안 토큰(JWT)을 발급하고,
 /// 외부 시스템에서 이를 검증할 수 있도록 JWKS 형식의 공개키를 제공합니다.
 pub struct JwtSigner {
-    encoding_key: EncodingKey,
+    signing_key: SigningKey,
     verifying_key: VerifyingKey,
     issuer: String,
     ttl_seconds: u64,
@@ -32,12 +31,8 @@ pub enum JwtError {
     InvalidConfig(&'static str),
     #[error("system clock before unix epoch")]
     ClockBeforeUnixEpoch,
-    #[error("build jwt encoding key")]
-    EncodingKey(jsonwebtoken::errors::Error),
-    #[error("jwt encode")]
-    Encode(#[from] jsonwebtoken::errors::Error),
-    #[error("jwks marshal")]
-    Jwks(#[from] serde_json::Error),
+    #[error("serialize jwt")]
+    Json(#[from] serde_json::Error),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -50,6 +45,13 @@ struct JwtClaims {
     phone_number: String,
     carrier: String,
     jti: String,
+}
+
+#[derive(Serialize)]
+struct JwtHeader<'a> {
+    alg: &'static str,
+    typ: &'static str,
+    kid: &'a str,
 }
 
 impl JwtSigner {
@@ -65,8 +67,6 @@ impl JwtSigner {
         let pem_str = normalize_pem(pem_str);
         let signing_key = SigningKey::from_pkcs8_pem(&pem_str)?;
         let verifying_key = signing_key.verifying_key();
-        let encoding_key =
-            EncodingKey::from_ed_pem(pem_str.as_bytes()).map_err(JwtError::EncodingKey)?;
 
         if settings.jwt_ttl_seconds == 0 {
             return Err(JwtError::InvalidConfig(
@@ -77,7 +77,7 @@ impl JwtSigner {
         let extra_jwks_keys = parse_extra_jwks_keys(&settings.jwt_extra_jwks_keys, &key_id)?;
 
         Ok(Some(Self {
-            encoding_key,
+            signing_key,
             verifying_key,
             issuer: settings.jwt_issuer.clone(),
             ttl_seconds: settings.jwt_ttl_seconds,
@@ -115,11 +115,28 @@ impl JwtSigner {
             jti: jti.to_string(),
         };
 
-        let mut header = Header::new(Algorithm::EdDSA);
-        header.typ = Some("JWT".to_string());
-        header.kid = Some(self.key_id.clone());
+        let header = JwtHeader {
+            alg: "EdDSA",
+            typ: "JWT",
+            kid: &self.key_id,
+        };
 
-        jsonwebtoken::encode(&header, &claims, &self.encoding_key).map_err(JwtError::from)
+        let header_json = serde_json::to_vec(&header)?;
+        let claims_json = serde_json::to_vec(&claims)?;
+
+        let encoded_header = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(header_json);
+        let encoded_claims = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims_json);
+
+        let mut token = String::with_capacity(encoded_header.len() + encoded_claims.len() + 88);
+        token.push_str(&encoded_header);
+        token.push('.');
+        token.push_str(&encoded_claims);
+
+        let signature = self.signing_key.sign(token.as_bytes());
+        token.push('.');
+        token.push_str(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes()));
+
+        Ok(token)
     }
 
     /// Ed25519 공개키를 JWKS 문서로 직렬화합니다.
@@ -139,7 +156,7 @@ impl JwtSigner {
 
         let jwks = json!({ "keys": keys });
 
-        serde_json::to_vec(&jwks).map_err(JwtError::from)
+        Ok(serde_json::to_vec(&jwks)?)
     }
 }
 
@@ -267,8 +284,9 @@ fn parse_extra_jwks_keys(raw: &str, current_key_id: &str) -> Result<Vec<Value>, 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::pkcs8::{EncodePrivateKey, EncodePublicKey};
-    use jsonwebtoken::{decode, decode_header, DecodingKey, Validation};
+    use base64::Engine;
+    use ed25519_dalek::pkcs8::EncodePrivateKey;
+    use ed25519_dalek::{Signature, Verifier};
     use pkcs8::LineEnding;
 
     #[test]
@@ -383,25 +401,38 @@ mod tests {
             .sign("test-auth-id", "01012345678", "KT", "test-jti")
             .unwrap();
 
-        let header = decode_header(&token).unwrap();
-        assert_eq!(header.alg, Algorithm::EdDSA);
-        assert_eq!(header.typ.as_deref(), Some("JWT"));
-        assert_eq!(header.kid.as_deref(), Some("current-key"));
+        let mut parts = token.split('.');
+        let header_b64 = parts.next().unwrap();
+        let claims_b64 = parts.next().unwrap();
+        let signature_b64 = parts.next().unwrap();
+        assert!(parts.next().is_none());
 
-        let public_pem = signer
-            .verifying_key
-            .to_public_key_pem(LineEnding::default())
+        let header_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(header_b64)
             .unwrap();
-        let claims = decode::<JwtClaims>(
-            &token,
-            &DecodingKey::from_ed_pem(public_pem.as_bytes()).unwrap(),
-            &Validation::new(Algorithm::EdDSA),
-        )
-        .unwrap();
-        assert_eq!(claims.claims.auth_id, "test-auth-id");
-        assert_eq!(claims.claims.phone_number, "01012345678");
-        assert_eq!(claims.claims.carrier, "KT");
-        assert_eq!(claims.claims.iss, "https://issuer.example");
+        let header: serde_json::Value = serde_json::from_slice(&header_bytes).unwrap();
+        assert_eq!(header["alg"], "EdDSA");
+        assert_eq!(header["typ"], "JWT");
+        assert_eq!(header["kid"], "current-key");
+
+        let claims_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(claims_b64)
+            .unwrap();
+        let claims: JwtClaims = serde_json::from_slice(&claims_bytes).unwrap();
+        assert_eq!(claims.auth_id, "test-auth-id");
+        assert_eq!(claims.phone_number, "01012345678");
+        assert_eq!(claims.carrier, "KT");
+        assert_eq!(claims.iss, "https://issuer.example");
+
+        let signing_input = format!("{header_b64}.{claims_b64}");
+        let signature_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(signature_b64)
+            .unwrap();
+        let signature = Signature::try_from(signature_bytes.as_slice()).unwrap();
+        assert!(signer
+            .verifying_key
+            .verify(signing_input.as_bytes(), &signature)
+            .is_ok());
 
         let jwks_bytes = signer.jwks().unwrap();
         let jwks: serde_json::Value = serde_json::from_slice(&jwks_bytes).unwrap();

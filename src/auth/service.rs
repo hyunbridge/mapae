@@ -102,7 +102,7 @@ pub enum AuthError {
     #[error("invalid random byte length")]
     InvalidRandomLength,
     #[error("random byte generation failed: {0}")]
-    Random(#[from] getrandom::Error),
+    Random(getrandom::Error),
     #[error(transparent)]
     Serde(#[from] serde_json::Error),
 }
@@ -285,7 +285,7 @@ fn random_hex(bytes_len: usize) -> Result<String, AuthError> {
         return Err(AuthError::InvalidRandomLength);
     }
     let mut buf = vec![0u8; bytes_len];
-    getrandom::getrandom(&mut buf)?;
+    getrandom::getrandom(&mut buf).map_err(AuthError::Random)?;
     Ok(hex::encode(buf))
 }
 
