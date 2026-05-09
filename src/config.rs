@@ -13,6 +13,27 @@ pub enum ServerMode {
     Smtp,
 }
 
+/// SPF 검증에 사용할 DNS 리졸버.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpfResolver {
+    Cloudflare,
+    Google,
+    Quad9,
+}
+
+impl FromStr for SpfResolver {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "cloudflare" => Ok(Self::Cloudflare),
+            "google" => Ok(Self::Google),
+            "quad9" => Ok(Self::Quad9),
+            _ => Err("expected one of: cloudflare, google, quad9".to_string()),
+        }
+    }
+}
+
 impl ServerMode {
     pub fn runs_http(self) -> bool {
         matches!(self, Self::All | Self::Http)
@@ -60,6 +81,9 @@ pub struct Settings {
     /// 디버깅용 inbound 메시지 일부를 로그로 남깁니다.
     #[serde(deserialize_with = "deserialize_bool_or_default")]
     pub dump_inbound: bool,
+    /// SPF 검증에 사용할 DNS 리졸버.
+    #[serde(deserialize_with = "deserialize_spf_resolver")]
+    pub spf_resolver: SpfResolver,
     /// HTTP 리스너 호스트.
     pub http_host: String,
     /// HTTP 리스너 포트.
@@ -145,6 +169,7 @@ impl Default for Settings {
             smtp_max_connections: 1024,
             sms_inbound_address: "verify@example.com".to_string(),
             dump_inbound: false,
+            spf_resolver: SpfResolver::Cloudflare,
             http_host: "0.0.0.0".to_string(),
             http_port: 8000,
             http_max_connections: 1024,
@@ -194,6 +219,13 @@ where
         "smtp" => Ok(ServerMode::Smtp),
         _ => Err(D::Error::custom(format!("invalid server mode: {value}"))),
     }
+}
+
+fn deserialize_spf_resolver<'de, D>(deserializer: D) -> Result<SpfResolver, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_from_str_or_missing(deserializer, || Settings::default().spf_resolver)
 }
 
 fn deserialize_smtp_port<'de, D>(deserializer: D) -> Result<u16, D::Error>
@@ -449,6 +481,19 @@ mod tests {
     }
 
     #[test]
+    fn test_env_spf_resolver() {
+        assert_eq!(
+            settings_from_env(&[("SPF_RESOLVER", "google")]).spf_resolver,
+            SpfResolver::Google
+        );
+        assert_eq!(
+            settings_from_env(&[("SPF_RESOLVER", "QUAD9")]).spf_resolver,
+            SpfResolver::Quad9
+        );
+        assert!(settings_result_from_env(&[("SPF_RESOLVER", "invalid")]).is_err());
+    }
+
+    #[test]
     fn test_load_defaults() {
         for var in &[
             "DEBUG",
@@ -463,6 +508,7 @@ mod tests {
             "SMTP_MAX_CONNECTIONS",
             "SMS_INBOUND_ADDRESS",
             "DUMP_INBOUND",
+            "SPF_RESOLVER",
             "HTTP_HOST",
             "HTTP_PORT",
             "HTTP_MAX_CONNECTIONS",
@@ -490,6 +536,7 @@ mod tests {
         assert_eq!(s.smtp_max_connections, 1024);
         assert_eq!(s.sms_inbound_address, "verify@example.com");
         assert!(!s.dump_inbound);
+        assert_eq!(s.spf_resolver, SpfResolver::Cloudflare);
         assert_eq!(s.http_host, "0.0.0.0");
         assert_eq!(s.http_port, 8000);
         assert_eq!(s.http_max_connections, 1024);

@@ -62,8 +62,10 @@ MAPAE는 SMTP 서버와 HTTP API를 동시에 제공합니다.
 | `SMTP_MAX_CONNECTIONS` | `1024` | 최대 동시 SMTP 연결 수 |
 | `SMS_INBOUND_ADDRESS` | `verify@example.com` | 인바운드 수신 주소 (정확히 일치하지 않으면 수신 거부) |
 | `DUMP_INBOUND` | `false` | 수신된 이메일의 헤더/본문을 로그에 출력 |
+| `SPF_RESOLVER` | `cloudflare` | SPF 검증에 사용할 DNS 리졸버 (`cloudflare`, `google`, `quad9`) |
 
 인증에 사용되는 발신 주소의 local-part는 10~11자리 숫자여야 합니다.
+SPF 리졸버는 기본값으로 Cloudflare를 사용하며, 필요하면 `SPF_RESOLVER`로 다른 공용 리졸버를 선택할 수 있습니다.
 
 ### HTTP 서버
 

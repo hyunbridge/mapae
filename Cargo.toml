@@ -24,7 +24,8 @@ opt-level = 0
 opt-level = 3
 
 [dependencies]
-warp = { version = "0.4", features = ["server"] }
+warp = { version = "0.4" }
+hyper = { version = "1", features = ["server", "http1"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "signal", "sync", "io-util"] }
 tokio-util = { version = "0.7", features = ["io-util"] }
 serde = { version = "1", features = ["derive"] }
@@ -36,13 +37,12 @@ base64 = "0.22"
 getrandom = "0.2"
 hex = "0.4"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-mailparse = "0.16"
-mail-auth = { version = "0.8", default-features = false, features = ["ring"] }
+tracing-subscriber = { version = "0.3", features = ["fmt"] }
+quoted_printable = "0.5"
+mail-auth = { version = "0.9", default-features = false, features = ["ring"] }
 moka = { version = "0.12", features = ["sync"] }
 time = { version = "0.3", features = ["formatting", "macros"] }
-jsonwebtoken = { version = "10", features = ["use_pem", "ed25519-dalek", "rust_crypto"] }
-hyper-util = { version = "0.1.20", features = ["server", "http1", "http2", "tokio", "service"] }
+hyper-util = { version = "0.1.20", features = ["tokio", "service"] }
 tokio-io-timeout = "1.2"
 anyhow = "1"
 thiserror = "2"

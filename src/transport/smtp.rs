@@ -16,7 +16,7 @@ use tracing::{error, info, warn};
 
 use super::{parser, DATA_SIZE_LIMIT_BYTES};
 use crate::auth::Service;
-use crate::config::Settings;
+use crate::config::{Settings, SpfResolver};
 use crate::metrics::METRICS;
 
 const APP_NAME: &str = "MAPAE";
@@ -40,7 +40,7 @@ pub async fn run(
         .with_context(|| format!("SMTP bind error: {bind_addr}"))?;
 
     let authenticator =
-        MessageAuthenticator::new_system_conf().context("SPF resolver init error")?;
+        build_spf_authenticator(config.spf_resolver).context("SPF resolver init error")?;
 
     info!("SMTP server listening on {}", bind_addr);
 
@@ -113,6 +113,15 @@ pub async fn run(
     }
 
     Ok(())
+}
+
+fn build_spf_authenticator(resolver: SpfResolver) -> anyhow::Result<MessageAuthenticator> {
+    match resolver {
+        SpfResolver::Cloudflare => MessageAuthenticator::new_cloudflare(),
+        SpfResolver::Google => MessageAuthenticator::new_google(),
+        SpfResolver::Quad9 => MessageAuthenticator::new_quad9(),
+    }
+    .map_err(Into::into)
 }
 
 async fn reject_smtp_session(mut stream: TcpStream) {
@@ -229,23 +238,24 @@ async fn handle_smtp_command(
     auth_service: &Service,
     authenticator: &MessageAuthenticator,
 ) -> io::Result<SessionAction> {
-    let upper = command.to_ascii_uppercase();
-    if upper.starts_with("EHLO ") || upper == "EHLO" {
+    if starts_with_ignore_ascii_case(command, "EHLO ") || command.eq_ignore_ascii_case("EHLO") {
         handle_helo_command(reader, session, command, true).await?;
-    } else if upper.starts_with("HELO ") || upper == "HELO" {
+    } else if starts_with_ignore_ascii_case(command, "HELO ")
+        || command.eq_ignore_ascii_case("HELO")
+    {
         handle_helo_command(reader, session, command, false).await?;
-    } else if upper.starts_with("MAIL FROM:") {
+    } else if starts_with_ignore_ascii_case(command, "MAIL FROM:") {
         handle_mail_command(reader, session, command).await?;
-    } else if upper.starts_with("RCPT TO:") {
+    } else if starts_with_ignore_ascii_case(command, "RCPT TO:") {
         handle_rcpt_command(reader, config, session, command).await?;
-    } else if upper == "DATA" {
+    } else if command.eq_ignore_ascii_case("DATA") {
         return handle_data_command(reader, config, auth_service, authenticator, session).await;
-    } else if upper == "RSET" {
+    } else if command.eq_ignore_ascii_case("RSET") {
         session.reset_transaction();
         write_reply(reader, SmtpReply::new(250, "OK", None)).await?;
-    } else if upper == "NOOP" {
+    } else if command.eq_ignore_ascii_case("NOOP") {
         write_reply(reader, SmtpReply::new(250, "OK", None)).await?;
-    } else if upper == "QUIT" {
+    } else if command.eq_ignore_ascii_case("QUIT") {
         write_reply(reader, SmtpReply::new(221, "Bye", None)).await?;
         return Ok(SessionAction::Close);
     } else {
@@ -292,7 +302,8 @@ async fn handle_mail_command(
         return Ok(());
     };
 
-    session.mail_from = from;
+    session.mail_from.clear();
+    session.mail_from.push_str(from);
     session.mail_seen = true;
     session.rcpt_count = 0;
     write_reply(reader, SmtpReply::new(250, "OK", None)).await
@@ -619,18 +630,15 @@ async fn read_line_limited(
     }
 }
 
-fn parse_smtp_path(value: &str) -> Option<String> {
+fn parse_smtp_path(value: &str) -> Option<&str> {
     let value = value.trim();
     if let Some(rest) = value.strip_prefix('<') {
         let end = rest.find('>')?;
-        return Some(rest[..end].trim().to_string());
+        return Some(rest[..end].trim());
     }
 
-    value
-        .split_whitespace()
-        .next()
-        .map(|addr| addr.trim().to_string())
-        .filter(|addr| !addr.is_empty())
+    let addr = value.split_whitespace().next()?.trim();
+    (!addr.is_empty()).then_some(addr)
 }
 
 fn parse_helo_domain(command: &str) -> Option<&str> {
@@ -952,30 +960,13 @@ async fn store_verification_by_nonce(
 }
 
 fn normalize_email_address(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed == "<>" {
-        return None;
-    }
+    parser::first_mailbox(value)
+}
 
-    if let Ok(addrs) = mailparse::addrparse(trimmed) {
-        if !addrs.is_empty() {
-            match &addrs[0] {
-                mailparse::MailAddr::Single(s) if !s.addr.is_empty() => {
-                    return Some(s.addr.clone());
-                }
-                mailparse::MailAddr::Group(g) => {
-                    if let Some(first) = g.addrs.first() {
-                        if !first.addr.is_empty() {
-                            return Some(first.addr.clone());
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    None
+fn starts_with_ignore_ascii_case(value: &str, prefix: &str) -> bool {
+    value
+        .get(..prefix.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
 }
 
 fn map_stream_parse_error(err: &parser::ParseError) -> SmtpReply {
