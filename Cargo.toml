@@ -24,20 +24,20 @@ opt-level = 0
 opt-level = 3
 
 [dependencies]
-warp = { version = "0.4" }
-hyper = { version = "1", features = ["server", "http1"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "signal", "sync", "io-util"] }
-tokio-util = { version = "0.7", features = ["io-util"] }
+warp = { version = "0.4", default-features = false }
+hyper = { version = "1", default-features = false, features = ["server", "http1"] }
+tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread", "net", "time", "signal", "sync", "io-util"] }
+tokio-util = { version = "0.7", default-features = false, features = ["io-util"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-redis = { version = "1", features = ["tokio-comp", "connection-manager"] }
+redis = { version = "1", default-features = false, features = ["tokio-comp", "connection-manager", "script"] }
 envy = "0.4"
-ed25519-dalek = { version = "2", features = ["pkcs8", "pem", "rand_core"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize", "pkcs8", "pem"] }
 base64 = "0.22"
 getrandom = "0.2"
-hex = "0.4"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt"] }
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
 quoted_printable = "0.5"
 mail-auth = { version = "0.9", default-features = false, features = ["ring"] }
 moka = { version = "0.12", features = ["sync"] }
@@ -46,8 +46,9 @@ hyper-util = { version = "0.1.20", features = ["tokio", "service"] }
 tokio-io-timeout = "1.2"
 anyhow = "1"
 thiserror = "2"
-percent-encoding = "2"
+percent-encoding = { version = "2", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize", "pkcs8", "pem", "rand_core"] }
 pkcs8 = { version = "0.10", features = ["pem"] }
 rand = "0.8"

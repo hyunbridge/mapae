@@ -333,7 +333,7 @@ async fn handle_rcpt_command(
         return Ok(());
     };
 
-    match handle_rcpt(config, session, &to) {
+    match handle_rcpt(config, session, to) {
         Ok(()) => {
             session.rcpt_count += 1;
             write_reply(reader, SmtpReply::new(250, "OK", None)).await
@@ -1081,12 +1081,12 @@ mod tests {
     #[test]
     fn parse_smtp_path_handles_params_and_brackets() {
         assert_eq!(
-            parse_smtp_path("<verify@example.com> SIZE=123").as_deref(),
+            parse_smtp_path("<verify@example.com> SIZE=123"),
             Some("verify@example.com")
         );
-        assert_eq!(parse_smtp_path("<>").as_deref(), Some(""));
+        assert_eq!(parse_smtp_path("<>"), Some(""));
         assert_eq!(
-            parse_smtp_path("verify@example.com SIZE=123").as_deref(),
+            parse_smtp_path("verify@example.com SIZE=123"),
             Some("verify@example.com")
         );
         assert_eq!(parse_smtp_path("<missing-end"), None);
