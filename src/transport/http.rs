@@ -1,4 +1,5 @@
 use anyhow::Context;
+use hyper::server::conn::http1::Builder as Http1Builder;
 use serde::Serialize;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -9,7 +10,6 @@ use tokio::sync::watch;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{error, warn};
-use hyper::server::conn::http1::Builder as Http1Builder;
 use warp::http::header::CONTENT_TYPE;
 use warp::http::HeaderValue;
 use warp::http::StatusCode;

@@ -437,9 +437,7 @@ fn scan_quoted_printable<R: Read + ?Sized>(
 ) -> io::Result<()> {
     let mut encoded = Vec::new();
     raw.read_to_end(&mut encoded)?;
-    if let Ok(decoded) =
-        quoted_printable_decode(&encoded, quoted_printable::ParseMode::Robust)
-    {
+    if let Ok(decoded) = quoted_printable_decode(&encoded, quoted_printable::ParseMode::Robust) {
         scanner.scan(&decoded);
     }
 

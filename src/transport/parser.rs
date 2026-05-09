@@ -129,9 +129,9 @@ pub(crate) fn first_mailbox(value: &str) -> Option<String> {
 }
 
 fn first_token_with_at(value: &str) -> Option<String> {
-    for token in value.split(|c: char| {
-        c.is_ascii_whitespace() || matches!(c, ',' | ';' | '(' | ')' | '[' | ']')
-    }) {
+    for token in value
+        .split(|c: char| c.is_ascii_whitespace() || matches!(c, ',' | ';' | '(' | ')' | '[' | ']'))
+    {
         let candidate = token.trim_matches(|c| matches!(c, '<' | '>' | '"'));
         if candidate.contains('@') {
             return Some(candidate.to_string());

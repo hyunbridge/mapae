@@ -134,7 +134,9 @@ impl JwtSigner {
 
         let signature = self.signing_key.sign(token.as_bytes());
         token.push('.');
-        token.push_str(&base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes()));
+        token.push_str(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes()),
+        );
 
         Ok(token)
     }
