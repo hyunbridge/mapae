@@ -286,17 +286,7 @@ fn random_hex(bytes_len: usize) -> Result<String, AuthError> {
     }
     let mut buf = vec![0u8; bytes_len];
     getrandom::getrandom(&mut buf)?;
-    Ok(encode_hex(&buf))
-}
-
-fn encode_hex(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for &byte in bytes {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    out
+    Ok(hex::encode(buf))
 }
 
 fn now_rfc3339() -> String {
