@@ -39,6 +39,9 @@ const HTTP_READ_HEADER_TIMEOUT: Duration = Duration::from_secs(5);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(15);
 const HTTP_WRITE_TIMEOUT: Duration = Duration::from_secs(15);
 const ERROR_INTERNAL_SERVER: &str = "Internal server error";
+const ERROR_METHOD_NOT_ALLOWED: &str = "Method not allowed";
+const ERROR_NOT_FOUND: &str = "Not found";
+const ERROR_SERVICE_UNAVAILABLE: &str = "Service unavailable";
 const ERROR_INVALID_AUTH_ID: &str = "Invalid auth_id";
 const CORS_ALLOWED_HEADERS: [&str; 2] = ["authorization", "content-type"];
 const PROMETHEUS_CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -122,6 +125,7 @@ pub async fn run(
         .or(auth_check)
         .or(auth_check_signed)
         .or(jwks)
+        .recover(handle_rejection)
         .with(cors)
         .with(warp::log("mapae::http"));
 
@@ -212,17 +216,36 @@ pub async fn run(
 }
 
 async fn reject_http_connection(mut stream: TcpStream) {
-    if let Err(err) = stream
-        .write_all(
-            b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
-        )
-        .await
-    {
+    let body = serde_json::to_vec(&error_response(ERROR_SERVICE_UNAVAILABLE))
+        .unwrap_or_else(|_| br#"{"detail":"Service unavailable"}"#.to_vec());
+    let mut response = format!(
+        "HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(&body);
+    if let Err(err) = stream.write_all(&response).await {
         warn!("HTTP reject write failed: {}", err);
     }
     if let Err(err) = stream.shutdown().await {
         warn!("HTTP reject shutdown failed: {}", err);
     }
+}
+
+async fn handle_rejection(err: warp::Rejection) -> Result<impl Reply, Infallible> {
+    let (status, detail) = if err.is_not_found() {
+        (StatusCode::NOT_FOUND, ERROR_NOT_FOUND)
+    } else if err.find::<warp::reject::MethodNotAllowed>().is_some() {
+        (StatusCode::METHOD_NOT_ALLOWED, ERROR_METHOD_NOT_ALLOWED)
+    } else {
+        error!("unhandled HTTP rejection: {:?}", err);
+        (StatusCode::INTERNAL_SERVER_ERROR, ERROR_INTERNAL_SERVER)
+    };
+
+    Ok(warp::reply::with_status(
+        warp::reply::json(&error_response(detail)),
+        status,
+    ))
 }
 
 fn build_cors(origins: &[String]) -> warp::filters::cors::Cors {
