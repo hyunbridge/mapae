@@ -72,15 +72,8 @@ pub fn extract_phone_and_carrier(from_address: &str) -> (Option<String>, Option<
         return (None, None);
     }
 
-    let addr = match mailparse::addrparse(trimmed) {
-        Ok(addrs) if !addrs.is_empty() => match &addrs[0] {
-            mailparse::MailAddr::Single(s) => s.addr.clone(),
-            mailparse::MailAddr::Group(g) => g
-                .addrs
-                .first()
-                .map_or_else(|| trimmed.to_string(), |a| a.addr.clone()),
-        },
-        _ => trimmed.to_string(),
+    let Some(addr) = first_mailbox(trimmed) else {
+        return (None, None);
     };
 
     let addr = addr.trim();
@@ -108,16 +101,70 @@ pub fn extract_phone_and_carrier(from_address: &str) -> (Option<String>, Option<
     (Some(phone), carrier)
 }
 
+pub(crate) fn first_mailbox(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed == "<>" {
+        return None;
+    }
+
+    if let Some(start) = trimmed.find('<') {
+        let before = trimmed[..start].trim();
+        if before.contains(',') || before.contains(';') {
+            if let Some(address) = first_token_with_at(before) {
+                return Some(address);
+            }
+        }
+
+        if let Some(address) = extract_bracketed_mailbox(trimmed) {
+            return Some(address);
+        }
+
+        let after = trimmed
+            .find('>')
+            .map_or("", |end| trimmed[end + 1..].trim());
+        return first_token_with_at(after);
+    }
+
+    first_token_with_at(trimmed)
+}
+
+fn first_token_with_at(value: &str) -> Option<String> {
+    for token in value.split(|c: char| {
+        c.is_ascii_whitespace() || matches!(c, ',' | ';' | '(' | ')' | '[' | ']')
+    }) {
+        let candidate = token.trim_matches(|c| matches!(c, '<' | '>' | '"'));
+        if candidate.contains('@') {
+            return Some(candidate.to_string());
+        }
+    }
+
+    None
+}
+
+fn extract_bracketed_mailbox(value: &str) -> Option<String> {
+    let start = value.find('<')?;
+    let end = value[start + 1..].find('>')? + start + 1;
+    let candidate = value[start + 1..end].trim();
+    if candidate.contains('@') {
+        Some(candidate.to_string())
+    } else {
+        None
+    }
+}
+
 fn normalize_digits(value: &str) -> String {
     value.chars().filter(char::is_ascii_digit).collect()
 }
 
 fn carrier_for_domain(domain: &str) -> Option<&'static str> {
-    match domain.to_ascii_lowercase().as_str() {
-        "vmms.nate.com" => Some("SKT"),
-        "mmsmail.uplus.co.kr" => Some("LGU+"),
-        "mms.kt.co.kr" => Some("KT"),
-        _ => None,
+    if domain.eq_ignore_ascii_case("vmms.nate.com") {
+        Some("SKT")
+    } else if domain.eq_ignore_ascii_case("mmsmail.uplus.co.kr") {
+        Some("LGU+")
+    } else if domain.eq_ignore_ascii_case("mms.kt.co.kr") {
+        Some("KT")
+    } else {
+        None
     }
 }
 

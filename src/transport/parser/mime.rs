@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read};
 
 use base64::{engine::general_purpose::STANDARD, read::DecoderReader};
-use mailparse::body::Body;
+use mail_parser::decoders::quoted_printable::quoted_printable_decode;
 
 use super::nonce::NonceScanner;
 use super::{
@@ -437,13 +437,8 @@ fn scan_quoted_printable<R: Read + ?Sized>(
 ) -> io::Result<()> {
     let mut encoded = Vec::new();
     raw.read_to_end(&mut encoded)?;
-
-    let ctype = mailparse::ParsedContentType::default();
-    let transfer_encoding = Some("quoted-printable".to_string());
-    if let Body::QuotedPrintable(body) = Body::new(&encoded, &ctype, &transfer_encoding) {
-        if let Ok(decoded) = body.get_decoded() {
-            scanner.scan(&decoded);
-        }
+    if let Some(decoded) = quoted_printable_decode(&encoded) {
+        scanner.scan(&decoded);
     }
 
     Ok(())

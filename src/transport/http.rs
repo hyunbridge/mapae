@@ -9,6 +9,7 @@ use tokio::sync::watch;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::{error, warn};
+use hyper::server::conn::http1::Builder as Http1Builder;
 use warp::http::header::CONTENT_TYPE;
 use warp::http::HeaderValue;
 use warp::http::StatusCode;
@@ -186,19 +187,19 @@ pub async fn run(
                     io.set_write_timeout(Some(HTTP_WRITE_TIMEOUT));
 
                     let io = hyper_util::rt::TokioIo::new(Box::pin(io));
-                    let service = warp::service(routes);
-                    let service = hyper_util::service::TowerToHyperService::new(service);
+                    let service = hyper_util::service::TowerToHyperService::new(warp::service(routes));
 
-                    let mut builder = hyper_util::server::conn::auto::Builder::new(
-                        hyper_util::rt::TokioExecutor::new(),
-                    );
+                    let mut builder = Http1Builder::new();
                     builder
-                        .http1()
                         .timer(hyper_util::rt::TokioTimer::new())
                         .header_read_timeout(Some(HTTP_READ_HEADER_TIMEOUT))
                         .keep_alive(true);
 
-                    if let Err(err) = builder.serve_connection_with_upgrades(io, service).await {
+                    if let Err(err) = builder
+                        .serve_connection(io, service)
+                        .with_upgrades()
+                        .await
+                    {
                         warn!("HTTP connection error from {}: {}", peer, err);
                     }
                 });
