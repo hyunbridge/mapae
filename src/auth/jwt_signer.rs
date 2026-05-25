@@ -287,9 +287,9 @@ fn parse_extra_jwks_keys(raw: &str, current_key_id: &str) -> Result<Vec<Value>, 
 mod tests {
     use super::*;
     use base64::Engine;
+    use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
     use ed25519_dalek::pkcs8::EncodePrivateKey;
     use ed25519_dalek::{Signature, Verifier};
-    use pkcs8::LineEnding;
 
     #[test]
     fn test_normalize_pem() {
@@ -356,7 +356,7 @@ mod tests {
 
     #[test]
     fn test_signer_rejects_zero_ttl_when_enabled() {
-        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let signing_key = SigningKey::from_bytes(&[42; 32]);
         let pkcs8 = signing_key.to_pkcs8_pem(LineEnding::default()).unwrap();
 
         let settings = Settings {
@@ -382,7 +382,7 @@ mod tests {
 
     #[test]
     fn test_sign_and_jwks() {
-        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let signing_key = SigningKey::from_bytes(&[43; 32]);
         let pkcs8 = signing_key.to_pkcs8_pem(LineEnding::default()).unwrap();
 
         let settings = Settings {
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn test_signer_rejects_invalid_extra_jwks_keys_when_enabled() {
-        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let signing_key = SigningKey::from_bytes(&[44; 32]);
         let pkcs8 = signing_key.to_pkcs8_pem(LineEnding::default()).unwrap();
 
         let settings = Settings {

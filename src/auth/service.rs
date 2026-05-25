@@ -286,7 +286,7 @@ fn random_hex(bytes_len: usize) -> Result<String, AuthError> {
         return Err(AuthError::InvalidRandomLength);
     }
     let mut buf = vec![0u8; bytes_len];
-    getrandom::getrandom(&mut buf).map_err(AuthError::Random)?;
+    getrandom::fill(&mut buf).map_err(AuthError::Random)?;
     Ok(hex::encode(buf))
 }
 
