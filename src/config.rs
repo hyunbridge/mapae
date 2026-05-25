@@ -130,6 +130,11 @@ impl Settings {
         self.jwt_extra_jwks_keys = self.jwt_extra_jwks_keys.trim().to_string();
         self.jwt_issuer = self.jwt_issuer.trim().to_string();
         self.cors_allow_origins = normalize_cors_allow_origins(self.cors_allow_origins);
+
+        if !is_valid_sms_inbound_address(&self.sms_inbound_address) {
+            bail!("SMS_INBOUND_ADDRESS must be a valid email address (e.g. verify@example.com)");
+        }
+
         if self.smtp_max_connections == 0 {
             bail!("SMTP_MAX_CONNECTIONS must be greater than 0");
         }
@@ -368,6 +373,84 @@ fn normalize_cors_allow_origins(origins: Vec<String>) -> Vec<String> {
     normalized
 }
 
+fn is_valid_sms_inbound_address(address: &str) -> bool {
+    if address.is_empty() || address.len() > 254 || !address.is_ascii() {
+        return false;
+    }
+    if address
+        .bytes()
+        .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace())
+    {
+        return false;
+    }
+
+    let Some((local, domain)) = address.split_once('@') else {
+        return false;
+    };
+    if domain.contains('@') {
+        return false;
+    }
+
+    is_valid_email_local_part(local) && is_valid_email_domain(domain)
+}
+
+fn is_valid_email_local_part(local: &str) -> bool {
+    if local.is_empty() || local.len() > 64 {
+        return false;
+    }
+
+    local
+        .split('.')
+        .all(|part| !part.is_empty() && part.bytes().all(is_email_atext))
+}
+
+fn is_email_atext(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'!' | b'#'
+                | b'$'
+                | b'%'
+                | b'&'
+                | b'\''
+                | b'*'
+                | b'+'
+                | b'-'
+                | b'/'
+                | b'='
+                | b'?'
+                | b'^'
+                | b'_'
+                | b'`'
+                | b'{'
+                | b'|'
+                | b'}'
+                | b'~'
+        )
+}
+
+fn is_valid_email_domain(domain: &str) -> bool {
+    if domain.is_empty() || domain.len() > 253 {
+        return false;
+    }
+
+    domain.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            && label
+                .as_bytes()
+                .first()
+                .is_some_and(u8::is_ascii_alphanumeric)
+            && label
+                .as_bytes()
+                .last()
+                .is_some_and(u8::is_ascii_alphanumeric)
+    })
+}
+
 pub(crate) fn allows_any_cors_origin(origins: &[String]) -> bool {
     origins.iter().any(|origin| origin.trim() == "*")
 }
@@ -491,6 +574,30 @@ mod tests {
             SpfResolver::Quad9
         );
         assert!(settings_result_from_env(&[("SPF_RESOLVER", "invalid")]).is_err());
+    }
+
+    #[test]
+    fn test_env_sms_inbound_address_validation() {
+        assert_eq!(
+            settings_from_env(&[("SMS_INBOUND_ADDRESS", "test@example.com")]).sms_inbound_address,
+            "test@example.com"
+        );
+        assert!(settings_result_from_env(&[("SMS_INBOUND_ADDRESS", "")]).is_err());
+        assert!(settings_result_from_env(&[("SMS_INBOUND_ADDRESS", "no-at-sign")]).is_err());
+        assert!(settings_result_from_env(&[("SMS_INBOUND_ADDRESS", "@domain.com")]).is_err());
+        assert!(settings_result_from_env(&[("SMS_INBOUND_ADDRESS", "local@")]).is_err());
+        assert!(settings_result_from_env(&[("SMS_INBOUND_ADDRESS", "a@b@c")]).is_err());
+        assert!(
+            settings_result_from_env(&[("SMS_INBOUND_ADDRESS", "<test@example.com>")]).is_err()
+        );
+        assert!(settings_result_from_env(&[("SMS_INBOUND_ADDRESS", "test@exa mple.com")]).is_err());
+        assert!(
+            settings_result_from_env(&[("SMS_INBOUND_ADDRESS", "test..user@example.com")]).is_err()
+        );
+        assert!(settings_result_from_env(&[("SMS_INBOUND_ADDRESS", "test@example..com")]).is_err());
+        assert!(settings_result_from_env(&[("SMS_INBOUND_ADDRESS", "test@-example.com")]).is_err());
+        assert!(settings_result_from_env(&[("SMS_INBOUND_ADDRESS", "test@example-.com")]).is_err());
+        assert!(settings_result_from_env(&[("SMS_INBOUND_ADDRESS", "test@例.example")]).is_err());
     }
 
     #[test]
