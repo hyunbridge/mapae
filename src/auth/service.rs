@@ -230,11 +230,12 @@ impl Service {
             return Ok(auth_check_response(AuthStatus::Waiting));
         }
 
+        let jti = random_hex(NONCE_BYTES)?;
         let token = signer.sign(
             auth_id,
             phone,
             decoded.carrier.as_deref().unwrap_or(""),
-            auth_id,
+            &jti,
         )?;
 
         Ok(AuthCheckResponse {
@@ -398,6 +399,83 @@ mod tests {
         assert_eq!(check.status, AuthStatus::Verified);
         assert_eq!(check.phone.as_deref(), Some("01012345678"));
         assert_eq!(check.carrier.as_deref(), Some("KT"));
+    }
+
+    #[tokio::test]
+    async fn test_check_signed_jti_is_random() {
+        use base64::Engine;
+        use ed25519_dalek::pkcs8::spki::der::pem::LineEnding;
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        use ed25519_dalek::SigningKey;
+
+        let store = MemoryStore::new();
+        let signing_key = SigningKey::from_bytes(&[42; 32]);
+        let pkcs8 = signing_key.to_pkcs8_pem(LineEnding::default()).unwrap();
+
+        let settings = Settings {
+            auth_ttl_seconds: 60,
+            verified_ttl_seconds: 30,
+            sms_inbound_address: "verify@example.com".to_string(),
+            jwt_private_key_pem: pkcs8.to_string(),
+            jwt_key_id: "test-key".to_string(),
+            jwt_issuer: "https://issuer.example".to_string(),
+            jwt_ttl_seconds: 120,
+            ..Settings::default()
+        };
+
+        let svc = Service::new(crate::storage::StoreBackend::memory(store), &settings).unwrap();
+
+        let init = svc.init_auth().await.unwrap();
+        let nonce = init
+            .sms_body
+            .strip_prefix("[MAPAE:")
+            .unwrap()
+            .strip_suffix(']')
+            .unwrap();
+
+        svc.consume_nonce_and_store_verified(nonce, Some("01012345678"), Some("KT"))
+            .await
+            .unwrap();
+
+        let first = svc.check_signed(&init.auth_id).await.unwrap();
+        let second = svc.check_signed(&init.auth_id).await.unwrap();
+        assert_eq!(first.status, AuthStatus::Verified);
+        assert_eq!(second.status, AuthStatus::Verified);
+
+        fn decode_claims(token: &str) -> serde_json::Value {
+            let mut parts = token.split('.');
+            let _header_b64 = parts.next().unwrap();
+            let claims_b64 = parts.next().unwrap();
+            let _signature_b64 = parts.next().unwrap();
+            assert!(parts.next().is_none());
+
+            let claims_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(claims_b64)
+                .unwrap();
+            serde_json::from_slice(&claims_bytes).unwrap()
+        }
+
+        let first_claims = decode_claims(first.token.as_deref().unwrap());
+        let second_claims = decode_claims(second.token.as_deref().unwrap());
+
+        assert_eq!(
+            first_claims["auth_id"].as_str(),
+            Some(init.auth_id.as_str())
+        );
+        assert_eq!(
+            second_claims["auth_id"].as_str(),
+            Some(init.auth_id.as_str())
+        );
+
+        let first_jti = first_claims["jti"].as_str().unwrap();
+        let second_jti = second_claims["jti"].as_str().unwrap();
+        assert_ne!(first_jti, init.auth_id);
+        assert_ne!(second_jti, init.auth_id);
+        assert_ne!(first_jti, second_jti);
+        assert_eq!(first_jti.len(), NONCE_HEX_LENGTH);
+        assert_eq!(second_jti.len(), NONCE_HEX_LENGTH);
+        assert!(first_jti.chars().all(|c| c.is_ascii_hexdigit()));
+        assert!(second_jti.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[tokio::test]
